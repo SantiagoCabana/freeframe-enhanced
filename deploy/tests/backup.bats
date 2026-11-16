@@ -1254,6 +1254,7 @@ UNITS="${BATS_TEST_DIRNAME}/../systemd"
 
 @test "restore gpu worker: after FreeFrame starts again, a worker that never sees the GPU is started again once; the restore still succeeds" {
   old_backup 20261020-030000
+  printf 'services:\n  worker:\n    image: legacy-api\n' >"$FF_ROOT/docker-compose.prod.yml"
   printf 'FREEFRAME_GPU=nvidia\n' >>"$ENV"
   printf 'services:\n  worker: {}\n' >"$FF_ROOT/docker-compose.gpu.yml"
   export STUB_WORKER_SMI=fail

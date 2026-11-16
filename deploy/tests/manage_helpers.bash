@@ -35,7 +35,8 @@ ff() {
 remote_release() {
   local v=$1 r=$STUB_REMOTE
   mkdir -p "$r/deploy/systemd"
-  printf 'services:\n  api: {}\n' >"$r/docker-compose.prod.yml"
+  # Historical installs still have a worker; rollback tests must retain it.
+  printf 'services:\n  api: {}\n  worker: {}\n' >"$r/docker-compose.prod.yml"
   printf 'services:\n  api:\n    image: ghcr.io/techiebutler/freeframe-api:${FREEFRAME_VERSION:-%s}\n  web:\n    image: ghcr.io/techiebutler/freeframe-web:${FREEFRAME_VERSION:-%s}\n' \
     "$v" "$v" >"$r/docker-compose.images.yml"
   printf 'services: {}\n' >"$r/docker-compose.https.yml"

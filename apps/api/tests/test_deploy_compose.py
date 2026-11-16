@@ -25,8 +25,8 @@ STORAGE_COMPOSE = REPO_ROOT / "docker-compose.storage.yml"
 GPU_COMPOSE = REPO_ROOT / "docker-compose.gpu.yml"
 CHANGELOG = REPO_ROOT / "CHANGELOG.md"
 
-APP_SERVICES = ("api", "worker", "email_worker", "maintenance_worker", "beat", "web")
-API_IMAGE_SERVICES = ("api", "worker", "email_worker", "maintenance_worker", "beat")
+APP_SERVICES = ("api", "email_worker", "maintenance_worker", "beat", "web")
+API_IMAGE_SERVICES = ("api", "email_worker", "maintenance_worker", "beat")
 SILO_TAG = "RELEASE.2026-09-16T00-00-00Z"
 
 # The commented-out Silo block in docker-compose.prod.yml, byte for byte. A
@@ -148,7 +148,6 @@ def test_base_prod_file_unchanged():
         "postgres",
         "redis",
         "api",
-        "worker",
         "email_worker",
         "maintenance_worker",
         "beat",
@@ -183,7 +182,7 @@ def test_base_prod_file_unchanged():
         "traefik.http.services.web.loadbalancer.server.port=3000",
     ]
 
-    for name in ("api", "worker", "email_worker", "maintenance_worker", "beat"):
+    for name in API_IMAGE_SERVICES:
         assert services[name]["build"] == {
             "context": ".",
             "dockerfile": "apps/api/Dockerfile.prod",
@@ -289,37 +288,17 @@ def test_storage_file_matches_commented_block():
 
 def test_gpu_file_touches_only_the_worker():
     services = _services(GPU_COMPOSE)
-    assert set(services) == {"worker"}
-    assert set(services["worker"]) == {"environment", "deploy"}
-    # Nothing but the GPU reservation: no limits, no replicas, no restart
-    # policy that would change the base file's worker.
-    assert services["worker"]["deploy"] == {
-        "resources": {"reservations": {"devices": services["worker"]["deploy"]["resources"]["reservations"]["devices"]}}
-    }
+    assert services == {}, "legacy overlays must not recreate the retired worker"
 
 
 def test_gpu_file_reserves_an_nvidia_gpu_with_the_video_capability():
-    worker = _services(GPU_COMPOSE)["worker"]
-    devices = worker["deploy"]["resources"]["reservations"]["devices"]
-    assert len(devices) == 1, devices
-    device = devices[0]
-    assert device["driver"] == "nvidia"
-    assert device["count"] == 1
-    # "gpu" picks Docker's NVIDIA driver; NVENC needs the "video" driver
-    # capability, and nvidia-smi (the transcoder's check, and status's) needs
-    # "utility". Docker passes these on as NVIDIA_DRIVER_CAPABILITIES.
-    assert set(device["capabilities"]) == {"gpu", "compute", "utility", "video"}
-    env = worker["environment"]
-    assert env["NVIDIA_DRIVER_CAPABILITIES"] == "compute,utility,video"
+    for service in _services(PROD_COMPOSE).values():
+        assert "devices" not in service.get("deploy", {}).get("resources", {}).get("reservations", {})
 
 
 def test_gpu_file_prefers_nvenc_and_keeps_the_cpu_fallback():
-    env = _services(GPU_COMPOSE)["worker"]["environment"]
-    # NVIDIA, not a backend that refuses to run without one: the transcoder
-    # falls back to the CPU when NVENC is missing or fails (detect_backend).
-    # A TRANSCODER_PIPELINE in .env.prod still wins.
-    assert env["TRANSCODER_PIPELINE"] == "${TRANSCODER_PIPELINE:-NVIDIA}"
-    assert set(env) == {"TRANSCODER_PIPELINE", "NVIDIA_DRIVER_CAPABILITIES"}
+    for path in (PROD_COMPOSE, IMAGES_COMPOSE, STORAGE_COMPOSE, GPU_COMPOSE):
+        assert "worker" not in _services(path)
 
 
 def test_gpu_pipeline_maps_to_nvenc_with_cpu_fallback():
@@ -338,7 +317,4 @@ def test_gpu_pipeline_maps_to_nvenc_with_cpu_fallback():
 
 
 def test_base_prod_worker_has_no_gpu():
-    worker = _services(PROD_COMPOSE)["worker"]
-    assert "deploy" not in worker
-    assert "environment" not in worker
-
+    assert "worker" not in _services(REPO_ROOT / "docker-compose.dev.yml")

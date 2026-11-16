@@ -46,13 +46,6 @@ import { PoweredByBadge } from '@/components/shared/powered-by-badge'
 import { usePageTitle } from '@/hooks/use-page-title'
 import type { Project, AssetResponse, ProjectMember, FolderTreeNode } from '@/types'
 
-const acceptByType: Record<string, string> = {
-  video: 'video/*',
-  audio: 'audio/*',
-  image: 'image/*',
-  image_carousel: 'image/*',
-}
-
 function ReviewScreenInner({ projectId }: { projectId: string }) {
   const router = useRouter()
   const pathname = usePathname()
@@ -60,9 +53,8 @@ function ReviewScreenInner({ projectId }: { projectId: string }) {
   const { asset, versions, isLoading, refetchComments, refetchVersions, togglePlayback } = useReview()
   const { currentVersion, isDrawingMode, focusedCommentId, playheadTime, seekTo, setFocusedCommentId, setActiveAnnotation } = useReviewStore()
   const { user } = useAuthStore()
-  const startVersionUpload = useUploadStore((s) => s.startVersionUpload)
+  const addDropNote = useUploadStore((s) => s.addDropNote)
   const toast = useToast()
-  const versionFileInputRef = useRef<HTMLInputElement>(null)
   const setExtraCrumbs = useBreadcrumbStore((s) => s.setExtraCrumbs)
   const setLabel = useBreadcrumbStore((s) => s.setLabel)
   usePageTitle(asset?.name ?? null)
@@ -639,25 +631,6 @@ function ReviewScreenInner({ projectId }: { projectId: string }) {
 
         {/* Right: version, share, sidebar toggle */}
         <div className="flex items-center gap-2 shrink-0 flex-1 justify-end">
-          {/* Hidden file input for new version upload */}
-          <input
-            ref={versionFileInputRef}
-            type="file"
-            className="hidden"
-            accept={acceptByType[asset.asset_type] ?? '*/*'}
-            onChange={async (e) => {
-              const file = e.target.files?.[0]
-              if (!file || !asset) return
-              // No row without a session: the upload would belong to nobody.
-              if (startVersionUpload(file, asset.id, asset.name, asset.project_id, project?.name) === null) {
-                toast.error('Sign in to upload')
-              }
-              e.target.value = ''
-              // The new version (it starts as "uploading") is fetched when the
-              // upload store says it exists, through `versionsRevision`; SSE
-              // transcode events then drive it through processing → ready (#118).
-            }}
-          />
           <VersionSwitcher versions={versions} />
           {asset && canCompare(asset.asset_type, versions) && (
             <button
@@ -682,9 +655,9 @@ function ReviewScreenInner({ projectId }: { projectId: string }) {
             </button>
           )}
           <button
-            onClick={() => versionFileInputRef.current?.click()}
+            onClick={() => addDropNote('Prepare and upload new versions with Electron/Ingest.')}
             className="inline-flex items-center gap-1.5 rounded-md px-2.5 h-8 text-xs font-medium border border-border text-text-secondary hover:text-text-primary hover:bg-bg-hover transition-colors"
-            title="Upload new version"
+            title="New versions are uploaded with Electron/Ingest"
           >
             <Upload className="h-3.5 w-3.5" />
             New Version

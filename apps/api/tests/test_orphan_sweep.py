@@ -62,6 +62,23 @@ def test_orphan_sweep_deletes_only_orphan_when_enabled(real_db, monkeypatch):
     assert deleted == ["raw/dead/dead/dead/original.mp4"]             # only the orphan; live keys untouched
 
 
+def test_ingest_master_protects_only_its_version_tree(real_db, monkeypatch):
+    pid, aid, vid, _ = _seed_media(real_db)
+    media = real_db.query(MediaFile).filter_by(version_id=uuid.UUID(vid)).one()
+    root = f"processed/{pid}/{aid}/{vid}"
+    media.s3_key_raw = f"{root}/master.m3u8"
+    media.s3_key_processed = None  # Ingest sets this only after completion.
+    real_db.flush()
+    old = datetime.now(timezone.utc) - timedelta(hours=48)
+    keys = [(f"{root}/master.m3u8", old, 1),
+            (f"{root}/720p/index.m3u8", old, 1),
+            (f"{root}/720p/segment.ts", old, 1),
+            (f"{root}-other/segment.ts", old, 1)]
+    counts, deleted = _run(real_db, monkeypatch, keys, delete=True)
+    assert counts.orphans == 1
+    assert deleted == [f"{root}-other/segment.ts"]
+
+
 def test_orphan_sweep_deletion_result_is_a_warning(real_db, monkeypatch, caplog):
     # What the sweep irreversibly removed has to reach an operator running the
     # worker at WARNING (#262); a deleting run that found nothing stays INFO.

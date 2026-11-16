@@ -24,7 +24,7 @@ def pin_psycopg2_driver(url: str) -> str:
     return url
 
 
-engine = create_engine(pin_psycopg2_driver(settings.database_url))
+engine = create_engine(pin_psycopg2_driver(settings.database_url), pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 class Base(DeclarativeBase):

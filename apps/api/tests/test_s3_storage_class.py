@@ -233,30 +233,21 @@ def _media_file():
     )
 
 
-def test_the_video_task_gives_the_transcoder_the_setting(monkeypatch):
+def test_retired_video_task_never_writes_media(monkeypatch):
     monkeypatch.setattr(settings, "s3_storage_class", "STANDARD_IA")
-    asset = SimpleNamespace(id="asset-1", project_id="proj-1")
-    with patch("packages.transcoder.ffmpeg_transcoder.FFmpegTranscoder") as cls, \
-         patch.object(transcode_tasks, "_run_async", MagicMock(side_effect=RuntimeError("stop"))):
-        with pytest.raises(RuntimeError, match="stop"):
-            transcode_tasks._process_video(
-                MagicMock(), asset, SimpleNamespace(id="ver-1"), _media_file(), MagicMock(),
-                "processed/p/a/v",
-            )
-
-    assert cls.call_args.kwargs["storage_class"] == "STANDARD_IA"
+    with patch.object(s3_service, "get_s3_client") as client:
+        with pytest.raises(RuntimeError, match="retired"):
+            transcode_tasks.process_asset.run("asset-1", "ver-1")
+    client.assert_not_called()
 
 
-@pytest.mark.parametrize("task, target", [
-    (transcode_tasks._process_audio, "packages.transcoder.image_processor.process_audio"),
-    (transcode_tasks._process_image, "packages.transcoder.image_processor.process_image"),
-])
-def test_the_audio_and_image_tasks_pass_the_setting(monkeypatch, task, target):
+@pytest.mark.parametrize("target", ["process_audio", "process_image"])
+def test_retired_task_never_calls_audio_or_image_processing(monkeypatch, target):
     monkeypatch.setattr(settings, "s3_storage_class", "STANDARD_IA")
-    with patch(target, return_value={}) as process:
-        task(MagicMock(), SimpleNamespace(), SimpleNamespace(), _media_file(), MagicMock(), "processed/p/a/v")
-
-    assert process.call_args.kwargs["storage_class"] == "STANDARD_IA"
+    with patch.object(image_processor, target) as process:
+        with pytest.raises(RuntimeError, match="retired"):
+            transcode_tasks.process_asset.run("asset-1", "ver-1")
+    process.assert_not_called()
 
 
 def test_the_watermark_task_writes_its_render_as_media(monkeypatch):
@@ -287,13 +278,7 @@ def test_the_watermark_task_writes_its_render_as_media(monkeypatch):
         Path(cmd[-1]).write_bytes(b"rendered")
         return MagicMock(returncode=0)
 
-    with patch.object(watermark_tasks, "SessionLocal", return_value=db), \
-         patch.object(s3_service, "get_s3_client", return_value=s3), \
-         patch.object(watermark_tasks.subprocess, "run", side_effect=ffmpeg), \
-         patch.object(watermark_tasks, "_publish_event"), \
-         patch.object(s3_service, "put_object") as put:
-        watermark_tasks.apply_watermark.run(asset_id, "CONFIDENTIAL", "center", 0.5, None)
-
-    put.assert_called_once()
-    assert put.call_args.args[:3] == (f"watermarked/{asset_id}/output.mp4", b"rendered", "video/mp4")
-    assert put.call_args.kwargs.get("media") is True
+    with patch.object(s3_service, "put_object") as put:
+        with pytest.raises(RuntimeError, match="retired"):
+            watermark_tasks.apply_watermark.run(asset_id, "CONFIDENTIAL", "center", 0.5, None)
+    put.assert_not_called()

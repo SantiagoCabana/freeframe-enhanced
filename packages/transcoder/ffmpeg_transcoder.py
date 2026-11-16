@@ -2443,7 +2443,7 @@ class FFmpegTranscoder(BaseTranscoder):
                             ffmpeg_cmd += [f"-c:a:{i}", "aac", f"-b:a:{i}", audio_bitrate]
                     if backend == "cpu" or dv_software:
                         enc = "libx265" if family == "hevc" else "libx264"
-                        ffmpeg_cmd += [f"-c:v:{i}", enc, "-preset", "fast",
+                        ffmpeg_cmd += [f"-c:v:{i}", enc, "-preset", "veryfast",
                                        f"-force_key_frames:v:{i}", "expr:gte(t,n_forced*2)"]
                         if enc == "libx264" and crf_offset < 0:
                             # Adaptive quantisation mode 3, "auto-variance with

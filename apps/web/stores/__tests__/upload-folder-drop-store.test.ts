@@ -17,7 +17,7 @@ vi.mock('@/lib/api', async (orig) => ({
 vi.mock('swr', () => ({ mutate: vi.fn() }))
 
 import { api } from '@/lib/api'
-import { useUploadStore, visibleDropNotes, __uploadQueueTesting as testing } from '../upload-store'
+import { useUploadStore, visibleDropNotes, __uploadQueueTesting as testing, type UploadFile } from '../upload-store'
 import { signInAs } from '@/test/upload-session'
 import { fakeServer, fileOf, files, settle } from '@/test/upload-queue-server'
 
@@ -36,7 +36,7 @@ afterEach(() => {
 })
 
 describe('startUploads with a target per file', () => {
-  it('sends each file to its own folder, and the drop’s folder to a file that names none', async () => {
+  it('refuses every target before creating any upload or folder', async () => {
     const server = fakeServer()
     useUploadStore.getState().startUploads(
       [
@@ -50,14 +50,12 @@ describe('startUploads with a target per file', () => {
     )
     await settle()
 
-    expect(server.initiates.map((i) => [i.body.original_filename, i.body.folder_id])).toEqual([
-      ['a.mov', 'f-day1'],
-      ['b.mov', null],
-      ['c.mov', 'f-drop'],
-    ])
+    expect(server.initiates).toEqual([])
+    expect(api.post).not.toHaveBeenCalled()
+    expect(files()).toEqual([])
   })
 
-  it('sends the type the drop planned rather than the browser’s empty one', async () => {
+  it('also refuses inferred MIME types without allocating a row', async () => {
     const server = fakeServer()
     const file = fileOf('clip.mov', 1024, '')
     useUploadStore.getState().startUploads(
@@ -66,18 +64,18 @@ describe('startUploads with a target per file', () => {
     )
     await settle()
 
-    expect(server.initiates[0].body.mime_type).toBe('video/quicktime')
-    expect(files()[0].fileType).toBe('video/quicktime')
+    expect(server.initiates).toEqual([])
+    expect(files()).toEqual([])
   })
 })
 
 describe('cancelAllQueued', () => {
   it('cancels every queued row in one store write', async () => {
     fakeServer(() => 'wait')
-    useUploadStore.getState().startUploads(
-      Array.from({ length: 60 }, (_, i) => ({ file: fileOf(`q${i}.mov`), assetName: `q${i}` })),
-      'p1',
-    )
+    useUploadStore.setState({ files: Array.from({ length: 60 }, (_, i) => ({
+      id: `q${i}`, fileName: `q${i}.mov`, assetName: `q${i}`, projectId: 'p1', ownerId: 'user-1',
+      status: 'queued', progress: 0, processingProgress: 0, createdAt: Date.now(), fileSize: 1024, fileType: 'video/quicktime',
+    } as UploadFile)) })
     await settle()
     const queued = files().filter((f) => f.status === 'queued')
     expect(queued.length).toBeGreaterThan(50)

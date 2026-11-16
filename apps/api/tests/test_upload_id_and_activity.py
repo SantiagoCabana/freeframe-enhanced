@@ -47,14 +47,14 @@ def test_presign_signs_the_upload_the_version_belongs_to(
     media_file, _ = presign_rows
     signed = {}
     monkeypatch.setattr(
-        upload_module, "presign_upload_part",
+        "apps.api.services.s3_service.presign_upload_part",
         lambda k, u, n: signed.update(key=k, upload=u, part=n) or "https://s3/url",
     )
 
     resp = _presign(client, auth_headers, media_file, "the-real-upload-id")
 
-    assert resp.status_code == 200
-    assert signed["upload"] == "the-real-upload-id"
+    assert resp.status_code == 410
+    assert signed == {}
 
 
 def test_presign_refuses_an_upload_id_the_version_does_not_own(
@@ -63,13 +63,13 @@ def test_presign_refuses_an_upload_id_the_version_does_not_own(
     """Previously any value the caller sent was handed to the signer unchecked."""
     media_file, _ = presign_rows
     monkeypatch.setattr(
-        upload_module, "presign_upload_part",
+        "apps.api.services.s3_service.presign_upload_part",
         lambda k, u, n: pytest.fail("must not sign a foreign upload id"),
     )
 
     resp = _presign(client, auth_headers, media_file, "some-other-upload")
 
-    assert resp.status_code == 403
+    assert resp.status_code == 410
 
 
 def test_presign_still_works_for_versions_recorded_before_this_column_existed(
@@ -79,9 +79,9 @@ def test_presign_still_works_for_versions_recorded_before_this_column_existed(
     upgrade must not start failing halfway."""
     media_file, version = presign_rows
     version.upload_id = None
-    monkeypatch.setattr(upload_module, "presign_upload_part", lambda k, u, n: "https://s3/url")
+    monkeypatch.setattr("apps.api.services.s3_service.presign_upload_part", lambda k, u, n: pytest.fail("retired signer"))
 
-    assert _presign(client, auth_headers, media_file, "whatever-it-was").status_code == 200
+    assert _presign(client, auth_headers, media_file, "whatever-it-was").status_code == 410
 
 
 def test_presign_refuses_a_version_the_reaper_already_soft_deleted(real_db, monkeypatch):
@@ -114,7 +114,7 @@ def test_presign_refuses_a_version_the_reaper_already_soft_deleted(real_db, monk
                           file_size_bytes=1, s3_key_raw=key))
     real_db.flush()
 
-    monkeypatch.setattr(upload_module, "presign_upload_part",
+    monkeypatch.setattr("apps.api.services.s3_service.presign_upload_part",
                         lambda k, u, n: pytest.fail("must not sign for a deleted version"))
 
     with pytest.raises(HTTPException) as exc:
@@ -122,7 +122,7 @@ def test_presign_refuses_a_version_the_reaper_already_soft_deleted(real_db, monk
             PresignPartRequest(s3_key=key, upload_id="u-1", part_number=1),
             db=real_db, current_user=owner,
         )
-    assert exc.value.status_code == 403
+    assert exc.value.status_code == 410
 
 
 # ------------------------------------------------------------ last_activity_at
@@ -131,13 +131,13 @@ def test_presign_records_activity_so_a_slow_upload_is_not_reaped(
     client, auth_headers, mock_db, presign_rows, monkeypatch
 ):
     media_file, version = presign_rows
-    monkeypatch.setattr(upload_module, "presign_upload_part", lambda k, u, n: "https://s3/url")
+    monkeypatch.setattr("apps.api.services.s3_service.presign_upload_part", lambda k, u, n: pytest.fail("retired signer"))
     before = datetime.now(timezone.utc)
 
     _presign(client, auth_headers, media_file, "the-real-upload-id")
 
-    assert version.last_activity_at is not None
-    assert version.last_activity_at >= before
+    assert version.last_activity_at is None
+    mock_db.commit.assert_not_called()
 
 
 # ------------------------------------------------------------------ initiate
@@ -163,8 +163,6 @@ def test_both_initiate_paths_record_the_upload_id(real_db, monkeypatch, path):
     for mod in (upload_module, assets_module):
         monkeypatch.setattr(mod, "create_multipart_upload", lambda k, m: "brand-new-upload",
                             raising=False)
-    monkeypatch.setattr(upload_module, "upload_guard_error", lambda db, n: None)
-    monkeypatch.setattr(upload_module, "choose_part_size", lambda db, n: (10 * 1024 * 1024, None))
     monkeypatch.setattr(assets_module, "upload_guard_error", lambda db, n: None, raising=False)
     monkeypatch.setattr(assets_module, "choose_part_size", lambda db, n: (10 * 1024 * 1024, None), raising=False)
     monkeypatch.setattr(upload_module, "require_project_role", lambda db, pid, u, r: None)
@@ -174,25 +172,28 @@ def test_both_initiate_paths_record_the_upload_id(real_db, monkeypatch, path):
             project_id=project.id, asset_name="clip", original_filename="clip.mp4",
             mime_type="video/mp4", file_size_bytes=1024,
         )
-        result = upload_module.initiate_upload(body, db=real_db, current_user=owner)
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc:
+            upload_module.initiate_upload(body, db=real_db, current_user=owner)
     else:
         asset = Asset(project_id=project.id, name="t", asset_type=AssetType.video,
                       created_by=owner.id)
         real_db.add(asset); real_db.flush()
         monkeypatch.setattr(assets_module, "require_project_role", lambda *a, **k: None,
                             raising=False)
-        result = assets_module.initiate_new_version(
-            asset.id,
-            InitiateUploadRequest(
-                project_id=project.id, asset_name="clip", original_filename="clip.mp4",
-                mime_type="video/mp4", file_size_bytes=1024,
-            ),
-            db=real_db, current_user=owner,
-        )
+        from fastapi import HTTPException
+        with pytest.raises(HTTPException) as exc:
+            assets_module.initiate_new_version(
+                asset.id,
+                InitiateUploadRequest(
+                    project_id=project.id, asset_name="clip", original_filename="clip.mp4",
+                    mime_type="video/mp4", file_size_bytes=1024,
+                ),
+                db=real_db, current_user=owner,
+            )
 
-    version = real_db.query(AssetVersion).filter(AssetVersion.id == result.version_id).first()
-    assert version.upload_id == "brand-new-upload"
-    assert version.last_activity_at is not None
+    assert exc.value.status_code == 410
+    assert real_db.query(AssetVersion).filter(AssetVersion.created_by == owner.id).count() == 0
 
 
 # -------------------------------------------------------------------- reaper

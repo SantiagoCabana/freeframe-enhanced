@@ -6,9 +6,8 @@ reviewer on a slow link and the wrong file for an editor who wants the master
 back, so a download is now a choice between the original upload and whichever
 transcode the version already has as a single file.
 
-Only files that exist are offered. A video's lower rungs are HLS segments with
-no single file behind them, so the one transcode a video offers is the MP4 the
-transcoder remuxed from its top rung (`s3_key_download`), where there is one.
+Existing single-file derivatives remain available. HLS can also be downloaded
+as a streamed ZIP of its playlist graph; an Ingest master is not an original.
 
 The original is not for everyone. Project members can always have it; anyone
 else (a share-link visitor, a non-member of a public project, a direct share)
@@ -33,6 +32,7 @@ from .storage import get_allow_original_downloads
 
 ORIGINAL = "original"
 TRANSCODE = "transcode"
+HLS = "hls"
 
 _RESOLUTION = re.compile(r"RESOLUTION=(\d+)x(\d+)")
 
@@ -105,6 +105,15 @@ def download_choices(
     )]
 
     if asset_type == AssetType.video:
+        if _format_of(media_file.s3_key_raw) == "M3U8":
+            choices = []  # Ingest stores the master here, not the camera original.
+        if media_file.s3_key_processed:
+            choices.insert(0, DownloadChoice(
+                id=HLS, label="HLS package", format="ZIP",
+                s3_key=media_file.s3_key_processed, size_bytes=None,
+            ))
+
+    if asset_type == AssetType.video:
         # No processed prefix means no ladder, and so nothing remuxed from it.
         transcode = media_file.s3_key_download if media_file.s3_key_processed else None
     else:
@@ -119,7 +128,7 @@ def download_choices(
             size_bytes=None,
         ))
         if not allow_original:
-            choices = choices[1:]
+            choices = [c for c in choices if c.id != ORIGINAL]
     return choices
 
 
@@ -143,6 +152,8 @@ def describe_choices(
     so a failure here leaves the generic label and an unknown size.
     """
     for c in choices:
+        if c.id == HLS:
+            continue
         if c.id == TRANSCODE and asset_type == AssetType.video:
             label = _transcode_label(asset_type, media_file)
             if label != "transcode":
@@ -174,9 +185,11 @@ def pick_download(
     """
     choices = download_choices(asset_type, media_file, allow_original=allow_original)
     if rendition is None:
-        if prefer_original and choices[0].id == ORIGINAL:
-            return choices[0]
-        return choices[-1]
+        if prefer_original:
+            original = next((c for c in choices if c.id == ORIGINAL), None)
+            if original:
+                return original
+        return choices[-1] if choices else None
     choice = next((c for c in choices if c.id == rendition), None)
     if choice is None and rendition == ORIGINAL and not allow_original:
         raise OriginalNotAllowed()
@@ -223,6 +236,8 @@ def download_filename(asset: Asset, media_file: MediaFile, choice: DownloadChoic
     rung), the two would save under the same name, so the transcode says what
     it is: `Portrait (720p).mp4`.
     """
+    if choice.id == HLS:
+        return build_download_filename(asset.name, "hls.zip", None)
     name = build_download_filename(asset.name, choice.s3_key, media_file.original_filename)
     if choice.id == TRANSCODE and _format_of(choice.s3_key) == (
         _format_of(media_file.s3_key_raw) or _format_of(media_file.original_filename)

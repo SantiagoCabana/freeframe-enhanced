@@ -11,6 +11,8 @@ load helpers
 
 setup() {
   common_setup
+  # GPU behavior below belongs to historical revisions used for rollback.
+  printf 'services:\n  worker:\n    image: legacy-api\n' >"$FF_ROOT/docker-compose.prod.yml"
   export FF_SYS_ROOT="$BATS_TEST_TMPDIR/sys-root"
   mkdir -p "$FF_SYS_ROOT"
   BIN="$BATS_TEST_TMPDIR/bin"
@@ -70,6 +72,23 @@ wsl_smi() {
 }
 
 gpu_vars() { printf '%s|%s|%s|%s|%s' "$FF_GPU_VENDOR" "$FF_GPU_NAME" "$FF_GPU_DRIVER" "$FF_GPU_STATE" "$FF_GPU_WSL"; }
+
+@test "external preparation ignores a stale GPU selection and overlay" {
+  printf 'services:\n  api:\n    image: api\n' >"$FF_ROOT/docker-compose.prod.yml"
+  printf 'TRANSCODER_HWACCEL=nvidia\n' >"$F"
+  printf 'services:\n  worker:\n    image: legacy-api\n' >"$FF_ROOT/docker-compose.gpu.yml"
+  run compose_files "$FF_ROOT"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *docker-compose.gpu.yml* ]]
+}
+
+@test "external preparation never attempts GPU setup" {
+  printf 'services:\n  api:\n    image: api\n' >"$FF_ROOT/docker-compose.prod.yml"
+  detect_gpu() { echo 'unexpected hardware probe'; return 99; }
+  run _install_gpu_check "$F"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *'unexpected hardware probe'* ]]
+}
 
 # ---------------------------------------------------------------- detection
 

@@ -81,7 +81,7 @@ class Settings(BaseSettings):
     transcoder_engine: str = "ffmpeg"
     # Which rungs of the quality ladder to build, comma-separated. Valid names
     # are the keys of packages.transcoder.ffmpeg_transcoder.QUALITY_MAP; the
-    # default is the ladder that was hardcoded before this setting existed.
+    # default matches the deployment's 720p/360p ladder.
     # 2160p is opt-in and not part of it.
     #
     # An instance whose reviewers all watch at full size pays for the smaller
@@ -89,7 +89,7 @@ class Settings(BaseSettings):
     # above the source resolution are still dropped, so this cannot be used to
     # ask for more than the source has: a ladder left empty that way builds its
     # smallest rung at the source's own size.
-    transcoder_qualities: str = "1080p,720p,360p"
+    transcoder_qualities: str = "720p,360p"
 
     # Maximum size (bytes) for a single uploaded file. 0 = unlimited (no per-file cap).
     # Note: S3 multipart still caps effective size at ~10,000 parts x chunk size.

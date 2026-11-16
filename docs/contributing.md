@@ -31,7 +31,12 @@ docker compose -f docker-compose.dev.yml up --build
 open http://localhost:3000
 ```
 
-All services start automatically: PostgreSQL, Redis, Silo (S3, a MinIO fork), API, Celery workers, and the Next.js frontend.
+The development stack starts PostgreSQL, Redis, Silo (S3, a MinIO fork), API,
+email and maintenance workers, Beat, and the Next.js frontend. It has no
+multimedia worker. New videos are prepared in Electron and uploaded through the
+separate Ingest service; neither desktop nor Ingest starts with this Compose.
+See [media preparation](media-preparation.md) for retired routes, legacy uploads
+and the upgrade procedure.
 
 ### Dev Services
 

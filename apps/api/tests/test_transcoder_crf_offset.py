@@ -20,23 +20,19 @@ from packages.transcoder.ffmpeg_transcoder import (
 
 LADDER = ["1080p", "720p", "360p"]
 
-# Every encoder option main builds for the default ladder, copied from
-# `packages/transcoder/ffmpeg_transcoder.py` on main rather than derived from
-# the code under test -- the point of the comparison is that this file does not
-# follow the branch. The upgrade promise is that an instance which has chosen
-# nothing still gets exactly this, so the whole run of options is pinned and
-# not only `-crf`, which is how an added `-aq-mode` slipped past.
+# Pin encoder options independently of the implementation, including the fork's
+# CPU preset, so changes beyond the requested preset remain visible.
 MAIN_DEFAULT_ENCODER_OPTIONS = [
     "-map", "[1080p]",
-    "-c:v:0", "libx264", "-preset", "fast",
+    "-c:v:0", "libx264", "-preset", "veryfast",
     "-force_key_frames:v:0", "expr:gte(t,n_forced*2)",
     "-pix_fmt:v:0", "yuv420p", "-crf:v:0", "24",
     "-map", "[720p]",
-    "-c:v:1", "libx264", "-preset", "fast",
+    "-c:v:1", "libx264", "-preset", "veryfast",
     "-force_key_frames:v:1", "expr:gte(t,n_forced*2)",
     "-pix_fmt:v:1", "yuv420p", "-crf:v:1", "26",
     "-map", "[360p]",
-    "-c:v:2", "libx264", "-preset", "fast",
+    "-c:v:2", "libx264", "-preset", "veryfast",
     "-force_key_frames:v:2", "expr:gte(t,n_forced*2)",
     "-pix_fmt:v:2", "yuv420p", "-crf:v:2", "30",
 ]
@@ -100,14 +96,8 @@ def test_every_step_shifts_every_rung_of_every_backend(backend, option, level):
 
 
 @pytest.mark.parametrize("crf_offset", [None, 0])
-def test_an_instance_that_has_chosen_nothing_gets_the_command_main_built(crf_offset):
-    # The upgrade promise, at the level of the command. `None` is an instance
-    # that has never touched the setting, `0` is the Balanced step, which is a
-    # real choice of "what this always did"; both have to come out as main's
-    # encoder options, token for token. Compared against a literal rather than
-    # against the ladder's own numbers, because a comparison derived from this
-    # branch cannot show a difference against main -- that is how the
-    # unconditional `-aq-mode` got through.
+def test_an_instance_that_has_chosen_nothing_gets_the_default_command(crf_offset):
+    # Compare against literal encoder options rather than the implementation.
     cmd = _ffmpeg_cmd_for(LADDER, crf_offset=crf_offset)
     start = cmd.index("-map")
 

@@ -283,7 +283,7 @@ def test_process_video_wires_progress_into_the_transcode_job():
     assert job.progress_cb is None, "must stay optional for other backends"
 
     src = Path("apps/api/tasks/transcode_tasks.py").read_text()
-    assert "progress_cb=_on_progress" in src, "the video task must pass a progress callback"
+    assert "progress_cb=" not in src, "retired tasks must not start progress producers"
 
 
 def test_progress_events_name_the_version():
@@ -304,16 +304,11 @@ def test_progress_events_name_the_version():
         raise _Stop
 
     with patch("packages.transcoder.ffmpeg_transcoder.FFmpegTranscoder") as transcoder, \
-         patch.object(transcode_tasks, "_publish_event",
-                      side_effect=lambda p, t, pl: published.append((t, pl))):
+         patch("apps.api.services.event_service.publish_sync",
+               side_effect=lambda p, t, pl: published.append((t, pl))):
         transcoder.return_value.transcode.side_effect = _transcode
-        with pytest.raises(_Stop):
-            transcode_tasks._process_video(
-                MagicMock(), asset, version, media_file, MagicMock(), "processed/x",
-            )
+        with pytest.raises(RuntimeError, match="retired"):
+            transcode_tasks.process_asset.run(str(asset.id), str(version.id))
+        transcoder.assert_not_called()
 
-    assert published == [("transcode_progress", {
-        "asset_id": str(asset.id),
-        "version_id": str(version.id),
-        "percent": 42,
-    })]
+    assert published == []

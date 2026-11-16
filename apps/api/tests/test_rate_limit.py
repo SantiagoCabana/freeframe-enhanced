@@ -3,6 +3,15 @@ import pytest
 from unittest.mock import MagicMock, patch
 
 
+def test_public_share_validation_uses_deployment_limit():
+    from apps.api.routers.share import router
+
+    route = next(r for r in router.routes if r.path == "/share/{token}" and "GET" in r.methods)
+    dependency = route.dependencies[0].dependency
+    values = dict(zip(dependency.__code__.co_freevars, (cell.cell_contents for cell in dependency.__closure__)))
+    assert values == {"action": "share_validate", "max_requests": 600, "window_seconds": 60}
+
+
 class TestCheckRateLimit:
     """Tests for the Redis-based rate limit checker."""
 

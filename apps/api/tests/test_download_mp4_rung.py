@@ -140,19 +140,20 @@ def _process_video_with(result: TranscodeResult):
         s3_key_raw="raw/clip.mp4", s3_key_processed=None, s3_key_download=None,
         s3_key_thumbnail=None, duration_seconds=None,
     )
-    with _stubbed_transcoder(result):
-        transcode_tasks._process_video(
-            MagicMock(), asset, version, media_file, MagicMock(), "processed/p/a/v"
-        )
+    import pytest
+    with patch("packages.transcoder.ffmpeg_transcoder.FFmpegTranscoder") as encoder:
+        with pytest.raises(RuntimeError, match="retired"):
+            transcode_tasks.process_asset.run(str(asset.id), str(version.id))
+        encoder.assert_not_called()
     return media_file
 
 
-def test_the_version_row_records_the_download_rung():
+def test_retired_processing_cannot_create_a_download_rung():
     media_file = _process_video_with(TranscodeResult(
         success=True, hls_prefix="processed/p/a/v",
         mp4_key="processed/p/a/v/download.mp4",
     ))
-    assert media_file.s3_key_download == "processed/p/a/v/download.mp4"
+    assert media_file.s3_key_download is None
 
 
 def test_a_transcode_without_one_leaves_the_column_null():

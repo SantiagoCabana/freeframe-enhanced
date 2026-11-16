@@ -377,7 +377,7 @@ def _build_share_validate_response(
     )
 
 
-@router.get("/share/{token}", response_model=ShareLinkValidateResponse, dependencies=[Depends(rate_limit("share_validate", 30, 60))])
+@router.get("/share/{token}", response_model=ShareLinkValidateResponse, dependencies=[Depends(rate_limit("share_validate", 600, 60))])
 def validate_share_link_endpoint(
     token: str,
     log_open: bool = False,
@@ -1635,9 +1635,13 @@ def get_share_stream_url(
             ),
             prefer_original=prefer_original,
         )
-        url = generate_presigned_get_url(
-            choice.s3_key, download_filename=download_filename(asset, media_file, choice),
-        )
+        if choice.id == "hls":
+            from ..services.hls_download import archive_url
+            url = archive_url(choice.s3_key, download_filename(asset, media_file, choice))
+        else:
+            url = generate_presigned_get_url(
+                choice.s3_key, download_filename=download_filename(asset, media_file, choice),
+            )
     elif asset.asset_type == AssetType.video and media_file.s3_key_processed:
         # Route through /stream/hls so S3 can stay private (#51)
         hls_token = create_hls_token(media_file.s3_key_processed)

@@ -1200,19 +1200,12 @@ def test_the_default_is_to_refuse(tmp_path):
     with pytest.raises(TranscodeTruncated):
         refuse_a_truncated_result(tmp_path, 600.0)
 
-    # And the same at the task's own seam, where the only caller always passes
-    # it: a default of True there would switch the check off for anything that
-    # calls `_process_video` without saying.
-    import inspect
-
     from apps.api.tasks import transcode_tasks
-
-    assert inspect.signature(
-        transcode_tasks._process_video
-    ).parameters["final_attempt"].default is False
+    with pytest.raises(RuntimeError, match="retired"):
+        transcode_tasks.process_asset.run("asset", "version")
 
 
-def test_the_task_passes_its_own_retry_count_down():
+def test_retired_task_refuses_every_retry_count():
     # Celery's retry state lives on the task and is read after the transcode has
     # returned (`self.request.retries >= self.max_retries`), so the transcoder
     # cannot ask for it and has to be told beforehand.
@@ -1250,22 +1243,20 @@ def test_the_task_passes_its_own_retry_count_down():
                                  duration_seconds=6.0, width=16, height=16,
                                  fps=25.0)
         with patch("packages.transcoder.ffmpeg_transcoder.FFmpegTranscoder") as cls, \
-                patch.object(transcode_tasks, "_run_async",
-                             MagicMock(return_value=result)), \
-                patch.object(transcode_tasks, "SessionLocal", return_value=db), \
-                patch.object(transcode_tasks, "get_s3_client", MagicMock()), \
-                patch.object(transcode_tasks, "_publish_event", MagicMock()):
+                patch("apps.api.database.SessionLocal", return_value=db) as session:
             cls.return_value.transcode.return_value = None
             transcode_tasks.process_asset.push_request(retries=retries)
             try:
-                transcode_tasks.process_asset.run(
-                    "0f9ad1d6-0000-4000-8000-000000000001",
-                    "0f9ad1d6-0000-4000-8000-000000000002",
-                )
+                with pytest.raises(RuntimeError, match="retired"):
+                    transcode_tasks.process_asset.run(
+                        "0f9ad1d6-0000-4000-8000-000000000001",
+                        "0f9ad1d6-0000-4000-8000-000000000002",
+                    )
             finally:
                 transcode_tasks.process_asset.pop_request()
-        return cls.return_value.transcode.call_args[0][0].final_attempt
+            cls.assert_not_called()
+            session.assert_not_called()
 
     for retries, expected in ((0, False), (ceiling - 1, False),
                               (ceiling, True), (ceiling + 1, True)):
-        assert _flag_after(retries) is expected, f"retries={retries}"
+        _flag_after(retries)

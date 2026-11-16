@@ -36,7 +36,7 @@ export async function fetchDownloadUrl(
     const response = await fetch(`${API_URL}/share/${token}/stream/${assetId}?download=true${sp}`)
     if (!response.ok) return null
     const data = await response.json()
-    return data?.url ?? null
+    return data?.url?.startsWith('/stream/') ? `${API_URL}${data.url}` : data?.url ?? null
   } catch {
     return null
   }

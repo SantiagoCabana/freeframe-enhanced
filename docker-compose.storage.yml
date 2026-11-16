@@ -81,10 +81,6 @@ services:
     depends_on:
       minio:
         condition: service_healthy
-  worker:
-    depends_on:
-      minio:
-        condition: service_healthy
   email_worker:
     depends_on:
       minio:

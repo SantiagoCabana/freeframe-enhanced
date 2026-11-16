@@ -12,15 +12,40 @@ import posixpath
 from datetime import datetime, timedelta, timezone
 
 import jwt
-from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import Response
+from botocore.exceptions import BotoCoreError, ClientError
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import Response, StreamingResponse
+from urllib.parse import quote
 
 from ..config import settings
 from ..services.s3_service import generate_presigned_get_url, get_s3_client
+from ..services.hls_download import archive_claims, archive_objects, archive_chunks
+from ..middleware.rate_limit import rate_limit
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/stream", tags=["streaming"])
+
+
+@router.get("/hls-download", dependencies=[Depends(rate_limit("hls_download", 10, 60))])
+def download_hls(token: str = Query(...)):
+    claims = archive_claims(token)
+    try:
+        objects = archive_objects(claims["pfx"])
+    except ClientError as exc:
+        code = exc.response.get("Error", {}).get("Code")
+        if code in {"404", "NoSuchKey", "NotFound"}:
+            raise HTTPException(status_code=409, detail="HLS package is incomplete") from exc
+        raise HTTPException(status_code=503, detail="HLS storage is unavailable; retry") from exc
+    except BotoCoreError as exc:
+        raise HTTPException(status_code=503, detail="HLS storage is unavailable; retry") from exc
+    return StreamingResponse(
+        archive_chunks(objects), media_type="application/zip",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(claims['filename'], safe='')}",
+            "Cache-Control": "private, no-store",
+        },
+    )
 
 
 def create_hls_token(s3_prefix: str, expires_hours: int = 24) -> str:

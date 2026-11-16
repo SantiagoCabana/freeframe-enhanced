@@ -24,8 +24,6 @@
 services:
   api:
     image: ghcr.io/techiebutler/freeframe-api:${FREEFRAME_VERSION:-1.22.0}
-  worker:
-    image: ghcr.io/techiebutler/freeframe-api:${FREEFRAME_VERSION:-1.22.0}
   email_worker:
     image: ghcr.io/techiebutler/freeframe-api:${FREEFRAME_VERSION:-1.22.0}
   maintenance_worker:

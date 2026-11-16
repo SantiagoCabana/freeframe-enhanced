@@ -13,8 +13,6 @@ celery_app = Celery(
     broker=settings.redis_url,
     backend=settings.redis_url,
     include=[
-        "apps.api.tasks.transcode_tasks",
-        "apps.api.tasks.watermark_tasks",
         "apps.api.tasks.reminder_tasks",
         "apps.api.tasks.email_tasks",
         "apps.api.tasks.cleanup_tasks",
@@ -39,13 +37,11 @@ celery_app.conf.update(
     broker_transport_options={"socket_timeout": 5, "socket_connect_timeout": 5},
     # Define queues
     task_queues=(
-        Queue("default"),
-        Queue("transcoding"),
         Queue("email_high"),   # Magic codes, invites - immediate
         Queue("email_low"),    # Mentions, comments - can be delayed
         Queue("maintenance"),  # Housekeeping - long, I/O heavy, latency-insensitive
     ),
-    task_default_queue="default",
+    task_default_queue="maintenance",
     # Route tasks to queues.
     #
     # NOTE: the housekeeping tasks below register under bare names
@@ -53,18 +49,12 @@ celery_app.conf.update(
     # so a glob like "apps.api.tasks.cleanup_tasks.*" would never match them.
     # Route them by their bare name. See test_celery_queue_topology.py.
     task_routes={
-        "apps.api.tasks.transcode_tasks.*": {"queue": "transcoding"},
         "reap_stale_uploads": {"queue": "maintenance"},
         "send_due_date_reminders": {"queue": "maintenance"},
         "cleanup_soft_deleted": {"queue": "maintenance"},
-        "requeue_stuck_processing": {"queue": "maintenance"},
         "sweep_orphan_s3": {"queue": "maintenance"},
         # A listing per unmeasured version: long, I/O heavy, latency-insensitive.
         "backfill_media_derived_size": {"queue": "maintenance"},
-        # Not housekeeping: this one is dispatched from a request handler and
-        # is a full FFmpeg re-encode, so it belongs with the other transcoding
-        # work rather than behind an hour-long bucket sweep.
-        "apply_watermark": {"queue": "transcoding"},
         "apps.api.tasks.email_tasks.send_magic_code_email": {"queue": "email_high"},
         "apps.api.tasks.email_tasks.send_invite_email": {"queue": "email_high"},
         "apps.api.tasks.email_tasks.send_mention_email": {"queue": "email_low"},
@@ -88,10 +78,6 @@ celery_app.conf.beat_schedule = {
     "reap-stale-uploads": {
         "task": "reap_stale_uploads",
         "schedule": crontab(minute="0"),  # every hour
-    },
-    "requeue-stuck-processing": {
-        "task": "requeue_stuck_processing",
-        "schedule": crontab(minute="30"),  # every hour, offset from the reaper
     },
     "cleanup-soft-deleted": {
         "task": "cleanup_soft_deleted",

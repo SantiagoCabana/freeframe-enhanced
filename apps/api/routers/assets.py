@@ -29,7 +29,6 @@ from ..schemas.upload import (
 from ..services.storage import choose_part_size, upload_guard_error
 from ..services.versions import next_version_number
 from ..services.s3_service import create_multipart_upload
-from .upload import storage_initiate_error
 
 router = APIRouter(tags=["assets"])
 
@@ -411,9 +410,13 @@ def get_stream_url(
             ),
             prefer_original=prefer_original,
         )
-        url = generate_presigned_get_url(
-            choice.s3_key, download_filename=download_filename(asset, media_file, choice),
-        )
+        if choice.id == "hls":
+            from ..services.hls_download import archive_url
+            url = archive_url(choice.s3_key, download_filename(asset, media_file, choice))
+        else:
+            url = generate_presigned_get_url(
+                choice.s3_key, download_filename=download_filename(asset, media_file, choice),
+            )
     elif asset.asset_type == AssetType.video and media_file.s3_key_processed:
         # Route through the HLS proxy so the master playlist, variant
         # playlists, and .ts segments all get served via short-lived
@@ -453,71 +456,9 @@ def initiate_new_version(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Initiate upload of a new version for an existing asset."""
-    asset = db.query(Asset).filter(Asset.id == asset_id, Asset.deleted_at.is_(None)).first()
-    if not asset:
-        raise HTTPException(status_code=404, detail="Asset not found")
-    require_project_role(db, asset.project_id, current_user, ProjectRole.editor)
+    from ..services.media_processing import require_media_processing
 
-    if body.mime_type not in ALLOWED_MIME_TYPES:
-        raise HTTPException(status_code=400, detail="Unsupported file type")
-    guard_error = upload_guard_error(db, body.file_size_bytes)
-    if guard_error:
-        raise HTTPException(status_code=400, detail=guard_error)
-    part_size, part_error = choose_part_size(db, body.file_size_bytes)
-    if part_error:
-        raise HTTPException(status_code=400, detail=part_error)
-
-    next_version = next_version_number(db, asset_id)
-
-    version = AssetVersion(
-        asset_id=asset_id,
-        version_number=next_version,
-        processing_status=ProcessingStatus.uploading,
-        created_by=current_user.id,
-    )
-    db.add(version)
-    db.flush()
-
-    ext = os.path.splitext(body.original_filename)[1].lower()
-    s3_key = f"raw/{asset.project_id}/{asset_id}/{version.id}/original{ext}"
-    try:
-        upload_id = create_multipart_upload(s3_key, body.mime_type)
-    except Exception as exc:  # noqa: BLE001 - classified by storage_initiate_error
-        err = storage_initiate_error(exc)
-        if err is None:
-            raise
-        db.rollback()
-        raise err from exc
-
-    # Record which S3 upload backs this version. Without it nothing server-side can
-    # map a version to its multipart upload, so the reaper has to sweep the whole
-    # bucket and presign-part has nothing to validate against.
-    version.upload_id = upload_id
-    version.last_activity_at = datetime.now(timezone.utc)
-    # See initiate_upload: the part size belongs to the upload, not to the build
-    # of the client that happens to be pushing it.
-    version.chunk_size_bytes = part_size
-
-    file_type_map = {AssetType.image: FileType.image, AssetType.audio: FileType.audio, AssetType.video: FileType.video, AssetType.image_carousel: FileType.image}
-    media_file = MediaFile(
-        version_id=version.id,
-        file_type=file_type_map.get(asset.asset_type, FileType.video),
-        original_filename=body.original_filename,
-        mime_type=body.mime_type,
-        file_size_bytes=body.file_size_bytes,
-        s3_key_raw=s3_key,
-    )
-    db.add(media_file)
-    db.commit()
-
-    return InitiateUploadResponse(
-        upload_id=upload_id,
-        s3_key=s3_key,
-        asset_id=asset_id,
-        version_id=version.id,
-        chunk_size_bytes=part_size,
-    )
+    require_media_processing()
 
 
 @router.patch("/assets/{asset_id}/assignment", response_model=AssetResponse)

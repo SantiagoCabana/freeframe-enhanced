@@ -884,6 +884,10 @@ EOF
 # file (FREEFRAME_GPU=nvidia) is used only when it is there: the setup files
 # of a release from before it have none, and a rollback to them removes it.
 # FF_GPU_SKIP=1 (_gpu_start_check: the GPU cannot be used now) leaves it out.
+_has_media_worker() {
+  grep -q '^  worker:' "$1/docker-compose.prod.yml" 2>/dev/null
+}
+
 compose_files() {
   local file=$1 out="-f docker-compose.prod.yml -f docker-compose.images.yml"
   case "$(env_get "$file" FREEFRAME_HTTPS)" in
@@ -892,7 +896,7 @@ compose_files() {
   if [[ $(env_get "$file" FREEFRAME_STORAGE) == bundled ]]; then
     out+=" -f docker-compose.storage.yml"
   fi
-  if [[ $(env_get "$file" FREEFRAME_GPU) == nvidia && -f $(dirname "$file")/docker-compose.gpu.yml && -z ${FF_GPU_SKIP:-} ]]; then
+  if _has_media_worker "$(dirname "$file")" && [[ $(env_get "$file" FREEFRAME_GPU) == nvidia && -f $(dirname "$file")/docker-compose.gpu.yml && -z ${FF_GPU_SKIP:-} ]]; then
     out+=" -f docker-compose.gpu.yml"
   fi
   printf '%s\n' "$out"
@@ -1456,6 +1460,10 @@ _gpu_cpu_reason() {
 
 # _gpu_summary: the summary's Video row.
 _gpu_summary() {
+  if ! _has_media_worker "$(ff_root)"; then
+    printf 'prepared externally with Electron/Ingest'
+    return 0
+  fi
   if [[ ${FF_GPU:-off} == nvidia ]]; then
     printf 'processed on the GPU (%s), with the CPU as a fallback' "$FF_GPU_NAME"
     if [[ -n ${FF_GPU_SETUP:-} ]]; then
@@ -1472,6 +1480,10 @@ _gpu_summary() {
 # _gpu_ready_line: the closing message's line. With the GPU chosen, what
 # the worker said after the start (_gpu_worker_check) decides, not the plan.
 _gpu_ready_line() {
+  if ! _has_media_worker "$(ff_root)"; then
+    printf 'Video preparation: Electron/Ingest (no server multimedia worker).'
+    return 0
+  fi
   if [[ ${FF_GPU:-off} == nvidia && ${FF_GPU_WORKER:-} == unseen ]]; then
     printf 'Video processing: CPU for now: the worker could not use the GPU%s.' "$(_gpu_worker_named)"
   elif [[ ${FF_GPU:-off} == nvidia && ${FF_GPU_WORKER:-} == down ]]; then
@@ -1592,6 +1604,7 @@ _gpu_start_check() {
   local root
   root=$(ff_root)
   FF_GPU_SKIP=""
+  _has_media_worker "$root" || return 0
   [[ $(env_get "$root/.env.prod" FREEFRAME_GPU) == nvidia && -f $root/docker-compose.gpu.yml ]] || return 0
   detect_gpu
   [[ $FF_GPU_STATE != ready ]] || return 0
@@ -3069,6 +3082,14 @@ _install_ask_admin() {
 # _install_gpu_check FILE: detect the GPU and decide (_gpu_decide), before
 # the welcome, so the Video processing question is counted. Changes nothing.
 _install_gpu_check() {
+  if ! _has_media_worker "$(dirname "$1")"; then
+    case ${FF_GPU:-} in
+      "" | auto | nvidia | off) ;;
+      *) _ff_answer_error "FREEFRAME_GPU (--gpu) must be nvidia or off; it is '$FF_GPU'." "media preparation runs in Electron/Ingest on this release." ;;
+    esac
+    FF_GPU=off FF_GPU_SETUP="" FF_GPU_ASK="" FF_GPU_NOTE="" FF_GPU_OTHERS=0
+    return 0
+  fi
   detect_gpu
   _gpu_decide "$1"
   FF_GPU_OTHERS=0
@@ -6280,6 +6301,7 @@ _cfg_gpu_on() {
 # is a choice to make.
 _cfg_gpu() {
   local cur given=${FF_GPU:-} line
+  _has_media_worker "$(ff_root)" || return 0
   cur=$(env_get "$FF_CFG_FILE" FREEFRAME_GPU)
   FF_GPU_SETUP=""
   case $given in
@@ -6625,6 +6647,10 @@ _ff_mount_of() {
 _status_gpu() {
   local file=$1 root out name forced pre="  Video:        "
   root=$(ff_root)
+  if ! _has_media_worker "$root"; then
+    say "${pre}prepared externally with Electron/Ingest"
+    return 0
+  fi
   if [[ $(env_get "$file" FREEFRAME_GPU) != nvidia ]]; then
     detect_gpu
     if _gpu_usable; then

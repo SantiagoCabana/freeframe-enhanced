@@ -22,7 +22,7 @@ vi.mock('swr', () => ({ mutate: vi.fn() }))
 import { api, ApiError } from '@/lib/api'
 import { useUploadStore, __uploadQueueTesting as testing } from '../upload-store'
 import { signInAs, row } from '@/test/upload-session'
-import { MB, fakeServer, fileOf, settle, resumable } from '@/test/upload-queue-server'
+import { MB, fileOf, settle } from '@/test/upload-queue-server'
 
 const interrupted = (over: Parameters<typeof row>[0] = {}) =>
   row({
@@ -47,10 +47,10 @@ afterEach(() => {
 })
 
 describe('canResume', () => {
-  it('is true for an interrupted row nothing is working on', () => {
+  it('is false for an interrupted row after server processing retirement', () => {
     useUploadStore.setState({ files: [interrupted()] })
 
-    expect(canResume()).toBe(true)
+    expect(canResume()).toBe(false)
   })
 
   it('is false for a row that is not interrupted, has no upload to come back to, or does not exist', () => {
@@ -72,34 +72,19 @@ describe('canResume', () => {
     expect(canResume()).toBe(false)
   })
 
-  it('is false while a run of the row settles, and true again, to a subscriber, when it has', async () => {
-    fakeServer(() => 'wait')
-    const answers: Array<(v: unknown) => void> = []
-    vi.mocked(api.get).mockImplementation(() => new Promise((res) => answers.push(res)) as never)
+  it('refuses a stale Resume action without reading parts or changing its history', async () => {
     useUploadStore.setState({ files: [interrupted()] })
-
+    const before = useUploadStore.getState().files
     useUploadStore.getState().resumeUpload('r', fileOf('clip.mp4', 50 * MB))
     await settle()
-    // Cancelled while it asks `/parts`: plain interrupted again, run still there.
-    useUploadStore.getState().cancelUpload('r')
-    expect(useUploadStore.getState().files[0].status).toBe('interrupted')
+    expect(api.get).not.toHaveBeenCalled()
+    expect(api.post).not.toHaveBeenCalled()
+    expect(useUploadStore.getState().files).toBe(before)
+    expect(useUploadStore.getState().panelOpen).toBe(true)
     expect(canResume()).toBe(false)
-
-    // A subscriber that selects only this answer, as the panel's row does.
-    const seen: boolean[] = []
-    const stop = useUploadStore.subscribe((s) => {
-      const now = s.canResume('r')
-      if (seen[seen.length - 1] !== now) seen.push(now)
-    })
-    answers.shift()!(resumable({ file_size_bytes: 50 * MB }))
-    await settle()
-    stop()
-
-    expect(canResume()).toBe(true)
-    expect(seen).toEqual([true])
   })
 
-  it('is false while a Discard of the row is out, and true again, to a subscriber, if it fails', async () => {
+  it('remains false while a Discard is in flight and after storage fails', async () => {
     let failParts!: (err: unknown) => void
     vi.mocked(api.get).mockImplementation(() => new Promise((_, reject) => {
       failParts = reject
@@ -119,13 +104,13 @@ describe('canResume', () => {
     expect(await discarded).toBe('Storage is not answering')
     stop()
 
-    expect(canResume()).toBe(true)
-    expect(seen).toEqual([false, true])
+    expect(canResume()).toBe(false)
+    expect(seen).toEqual([false])
   })
 })
 
 describe('a Discard that failed', () => {
-  it('marks the row, so the panel can offer Dismiss, until a Resume takes it up', async () => {
+  it('preserves the discard error when a stale Resume action is invoked', async () => {
     vi.mocked(api.get).mockRejectedValue(new ApiError(503, 'Storage is not answering'))
     useUploadStore.setState({ files: [interrupted()] })
 
@@ -135,12 +120,12 @@ describe('a Discard that failed', () => {
       status: 'interrupted', error: 'Storage is not answering', discardFailed: true,
     })
 
-    fakeServer(() => 'wait')
-    vi.mocked(api.get).mockImplementation(() => new Promise(() => {}) as never)
+    vi.mocked(api.get).mockClear()
     useUploadStore.getState().resumeUpload('r', fileOf('clip.mp4', 50 * MB))
     await settle()
 
-    expect(useUploadStore.getState().files[0].discardFailed).toBeUndefined()
-    expect(useUploadStore.getState().files[0].error).toBeUndefined()
+    expect(api.get).not.toHaveBeenCalled()
+    expect(useUploadStore.getState().files[0].discardFailed).toBe(true)
+    expect(useUploadStore.getState().files[0].error).toBe('Storage is not answering')
   })
 })

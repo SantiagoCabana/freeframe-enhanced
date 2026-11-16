@@ -119,10 +119,9 @@ vi.mock('@/components/review/compare/compare-overlay', () => ({ CompareOverlay: 
 
 import ReviewPage from '../page'
 import { ToastProvider } from '@/components/shared/toast'
-import { ApiError } from '@/lib/api'
+import { api } from '@/lib/api'
 import { useUploadStore, __uploadQueueTesting as testing } from '@/stores/upload-store'
 import { signInAs, row } from '@/test/upload-session'
-import { MB, fakeServer, fileOf, drop, flush } from '@/test/upload-queue-server'
 
 const QUEUED_LINE = 'New version queued, waiting for other uploads'
 
@@ -144,12 +143,6 @@ function renderPage() {
   )
 }
 
-/** What clicking New Version and picking a file does. */
-function pickNewVersion(container: HTMLElement, file: File) {
-  const input = container.querySelector('input[type="file"]') as HTMLInputElement
-  fireEvent.change(input, { target: { files: [file] } })
-}
-
 beforeEach(() => {
   vi.clearAllMocks()
   testing.reset()
@@ -165,80 +158,25 @@ afterEach(() => {
 })
 
 describe('a new version waiting in the upload queue', () => {
-  it('the asset page shows the queued line and refetches when the version id arrives', async () => {
-    const server = fakeServer(() => 'wait', 'hang')
+  it('directs new versions to Electron/Ingest without allocating an upload', () => {
     const { container } = renderPage()
+    fireEvent.click(screen.getByRole('button', { name: /new version/i }))
+    expect(container.querySelector('input[type="file"]')).toBeNull()
+    expect(api.post).not.toHaveBeenCalled()
+    expect(useUploadStore.getState().files).toEqual([])
+    expect(useUploadStore.getState().panelOpen).toBe(true)
     expect(screen.queryByText(QUEUED_LINE)).toBeNull()
-
-    // Two files ahead of it: one starts, the other waits. A big file counts as
-    // the whole part budget while it initiates, so nothing else can start.
-    await act(async () => {
-      drop([fileOf('first.mov', 50 * MB), fileOf('second.mov', 50 * MB)])
-      await flush()
-    })
-    expect(server.names()).toEqual(['first.mov'])
-
-    await act(async () => {
-      pickNewVersion(container, fileOf('v2.mov', 50 * MB))
-      await flush()
-    })
-
-    // It is waiting for the two before it, and says so.
-    expect(screen.getByText(QUEUED_LINE)).toBeInTheDocument()
-    expect(server.names()).toEqual(['first.mov'])
-    // The old guesses at when the version exists are gone: nothing refetches
-    // however long it waits.
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(10_000)
-    })
     expect(refetchVersions).not.toHaveBeenCalled()
-
-    // The first is refused, the second takes its turn and is refused in the same
-    // way, and then it is the new version's turn: its initiate is out.
-    await act(async () => {
-      server.initiates[0].reject(new ApiError(400, 'No'))
-      await flush()
-    })
-    await act(async () => {
-      server.initiates[1].reject(new ApiError(400, 'No'))
-      await flush()
-    })
-    expect(server.names()).toEqual(['first.mov', 'second.mov', 'v2.mov'])
-    expect(screen.queryByText(QUEUED_LINE)).toBeNull()
-    // Its turn has begun but the version does not exist yet.
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(10_000)
-    })
-    expect(refetchVersions).not.toHaveBeenCalled()
-
-    // The initiate answers: the version is on the server, and only now does the
-    // page ask for it.
-    await act(async () => {
-      server.initiates[2].resolve()
-      await flush()
-    })
-    expect(refetchVersions).toHaveBeenCalledTimes(1)
-    // Once: no timers follow it.
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(10_000)
-    })
-    expect(refetchVersions).toHaveBeenCalledTimes(1)
   })
 
-  it('a new asset\'s initiate says nothing to the version list, which it is not on', async () => {
-    const server = fakeServer(() => 'wait', 'hang')
-    drop([fileOf('a.mov', 50 * MB)])
+  it('refetches versions on a revision without adding polling timers', async () => {
+    renderPage()
+    act(() => useUploadStore.setState({ versionsRevision: 1 }))
+    expect(refetchVersions).toHaveBeenCalledTimes(1)
     await act(async () => {
-      await flush()
+      await vi.advanceTimersByTimeAsync(10_000)
     })
-
-    await act(async () => {
-      server.initiates[0].resolve()
-      await flush()
-    })
-
-    expect(useUploadStore.getState().files[0]).toMatchObject({ status: 'uploading', versionId: 'v1' })
-    expect(useUploadStore.getState().versionsRevision).toBe(0)
+    expect(refetchVersions).toHaveBeenCalledTimes(1)
   })
 
   it('says nothing about another asset\'s queued version, or a queued new asset', () => {

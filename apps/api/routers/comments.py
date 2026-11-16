@@ -80,75 +80,8 @@ def _start_timecode_is_valid(start_tc: str, spec) -> bool:
 
 
 def _probe_source_timecode(media_file: Optional[MediaFile], spec) -> Optional[str]:
-    raw_key = getattr(media_file, "s3_key_raw", None)
-    if not isinstance(raw_key, str) or not raw_key:
-        return None
-
-    try:
-        source_url = s3_service.generate_internal_presigned_get_url(raw_key, expires_in=300)
-        result = subprocess.run(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-show_entries",
-                "stream=codec_type:stream_tags=timecode:format_tags=timecode",
-                "-of",
-                "json",
-                source_url,
-            ],
-            capture_output=True,
-            text=True,
-            timeout=15,
-        )
-    except Exception as exc:
-        log.warning(
-            "Could not probe embedded timecode for media file %s (%s)",
-            getattr(media_file, "id", None),
-            type(exc).__name__,
-        )
-        return None
-
-    if result.returncode != 0:
-        log.warning(
-            "ffprobe exited with status %s for media file %s",
-            result.returncode,
-            getattr(media_file, "id", None),
-        )
-        return None
-
-    try:
-        probe_data = json.loads(result.stdout)
-    except (json.JSONDecodeError, TypeError):
-        log.warning(
-            "ffprobe returned invalid JSON for media file %s",
-            getattr(media_file, "id", None),
-        )
-        return None
-
-    if not isinstance(probe_data, dict):
-        return None
-
-    candidates = []
-    streams = probe_data.get("streams")
-    if isinstance(streams, list):
-        for stream in streams:
-            if not isinstance(stream, dict) or stream.get("codec_type") != "video":
-                continue
-            tags = stream.get("tags")
-            if isinstance(tags, dict) and isinstance(tags.get("timecode"), str):
-                candidates.append(tags["timecode"])
-
-    format_data = probe_data.get("format")
-    if isinstance(format_data, dict):
-        tags = format_data.get("tags")
-        if isinstance(tags, dict) and isinstance(tags.get("timecode"), str):
-            candidates.append(tags["timecode"])
-
-    return next(
-        (candidate for candidate in candidates if _start_timecode_is_valid(candidate, spec)),
-        None,
-    )
+    # Exports use explicit timecode (or the documented default), never remote probing.
+    return None
 
 
 def _get_asset(db: Session, asset_id: uuid.UUID) -> Asset:

@@ -61,19 +61,18 @@ def test_only_a_superadmin_may_see_or_set_the_level(
 
 
 @pytest.mark.parametrize("level", sorted(COMPRESSION_LEVELS))
-def test_an_admin_can_set_every_level_on_the_scale(
+def test_an_admin_cannot_reactivate_retired_compression(
     client, auth_headers, mock_db, test_user, level
 ):
     test_user.is_superadmin = True
     row = _row()
     mock_db.first.return_value = row
 
-    body = client.put("/instance/settings", headers=auth_headers,
-                      json={"compression_level": level}).json()
-
-    assert row.compression_level == level
-    assert body["compression_level"] == level
-    assert body["compression_crf_offset"] == COMPRESSION_LEVELS[level]
+    response = client.put("/instance/settings", headers=auth_headers,
+                          json={"compression_level": level})
+    assert response.status_code == 410
+    assert row.compression_level is None
+    mock_db.commit.assert_not_called()
 
 
 @pytest.mark.parametrize("level", [
@@ -110,7 +109,7 @@ def test_the_scale_bounds_are_in_the_api_schema():
     (DEFAULT_COMPRESSION_LEVEL, "-8", 0, 3),  # a chosen level wins over it
     (None, "-5", -5, None),                   # an expert value no step names
 ])
-def test_the_page_is_shown_the_offset_the_next_transcode_will_use(
+def test_retired_compression_is_not_advertised_or_erased(
     client, auth_headers, mock_db, test_user, monkeypatch, stored, env, offset, step
 ):
     # The slider must not show one thing while the encoder does another, so the
@@ -124,11 +123,9 @@ def test_the_page_is_shown_the_offset_the_next_transcode_will_use(
 
     body = client.get("/instance/settings", headers=auth_headers).json()
 
-    assert body["compression_crf_offset"] == offset
-    assert body.get("compression_level_effective") == step
-    # One function behind it, which is what keeps the page and the encoder from
-    # drifting apart: the worker applies the same precedence.
-    assert settings_module.effective_crf_offset(row) == offset
+    assert not any(key.startswith("compression") for key in body)
+    assert row.compression_level == stored
+    mock_db.commit.assert_not_called()
 
 
 def test_a_fresh_instance_has_no_row_and_reading_does_not_create_one(
@@ -140,11 +137,11 @@ def test_a_fresh_instance_has_no_row_and_reading_does_not_create_one(
 
     body = client.get("/instance/settings", headers=auth_headers).json()
 
-    assert body["compression_crf_offset"] == -4
+    assert not any(key.startswith("compression") for key in body)
     mock_db.add.assert_not_called()
 
 
-def test_an_explicit_null_clears_the_level_and_an_omitted_key_does_not(
+def test_other_settings_preserve_historical_compression_and_null_is_refused(
     client, auth_headers, mock_db, test_user, monkeypatch
 ):
     # Why presence of the key is read instead of the value. Null is a real
@@ -161,10 +158,7 @@ def test_an_explicit_null_clears_the_level_and_an_omitted_key_does_not(
                json={"storage_limit_bytes": 1024})
     assert row.compression_level == 1
 
-    body = client.put("/instance/settings", headers=auth_headers,
-                      json={"compression_level": None}).json()
-
-    assert row.compression_level is None
-    assert "compression_level" not in body
-    assert body["compression_crf_offset"] == -4
-    assert body["compression_level_effective"] == 2
+    response = client.put("/instance/settings", headers=auth_headers,
+                          json={"compression_level": None})
+    assert response.status_code == 410
+    assert row.compression_level == 1

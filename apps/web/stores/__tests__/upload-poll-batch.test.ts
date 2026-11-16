@@ -102,7 +102,8 @@ describe('the processing poll', () => {
 
     await useUploadStore.getState().refreshProcessingItems()
 
-    expect(rowOf('row-0').status).toBe('processing')
+    expect(rowOf('row-0').status).toBe('failed')
+    expect(rowOf('row-0').error).toContain('Server processing retired')
     expect(rowOf('row-1')).toMatchObject({ status: 'failed', error: GONE_MESSAGE })
     expect(rowOf('row-2').status).toBe('complete')
   })

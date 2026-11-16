@@ -202,7 +202,7 @@ describe('uploadAllParts with parts already held', () => {
 
 // ---------------------------------------------------------------- resumeUpload
 
-describe('resumeUpload', () => {
+describe('retired resumeUpload preserves historical state', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     seedInterrupted()
@@ -211,26 +211,24 @@ describe('resumeUpload', () => {
     vi.mocked(api.get).mockResolvedValue(resumeInfo({ held_part_numbers: [1, 2] }) as never)
   })
 
-  it('sends only the parts the server says are missing, then completes', async () => {
+  it('does not send missing parts or complete the old upload', async () => {
     useUploadStore.getState().resumeUpload('row-1', makeFile())
-    await vi.waitFor(() => expect(rowOf('row-1').status).toBe('processing'))
-
-    expect(partsSentTo(put)).toEqual([3])
-    expect(completionBody().version_id).toBe(VERSION_ID)
+    expect(rowOf('row-1').status).toBe('interrupted')
+    expect(partsSentTo(put)).toEqual([])
+    expect(api.post).not.toHaveBeenCalled()
   })
 
-  it('takes the key and the upload id from the server, not from the row', async () => {
+  it('does not invent missing keys or upload IDs', async () => {
     // The row may have been rehydrated from history in a browser that never saw
     // either of them, which is the normal case after a closed tab.
     useUploadStore.getState().resumeUpload('row-1', makeFile())
-    await vi.waitFor(() => expect(rowOf('row-1').status).toBe('processing'))
-
-    expect(api.get).toHaveBeenCalledWith(`/upload/${VERSION_ID}/parts`, { pinSubject: 'u1' })
-    expect(completionBody().s3_key).toBe('raw/p/a/v/original.mp4')
-    expect(completionBody().upload_id).toBe('u1')
+    expect(rowOf('row-1').status).toBe('interrupted')
+    expect(api.get).not.toHaveBeenCalled()
+    expect(rowOf('row-1').s3Key).toBeUndefined()
+    expect(rowOf('row-1').uploadId).toBeUndefined()
   })
 
-  it('records the upload id it was given, so a second interruption can resume too', async () => {
+  it('preserves the version without fetching a new upload ID', async () => {
     // The row seeded here has no upload id, which is the normal shape of a row
     // this browser only knows from `/me/assets` or got back after storage was
     // cleared -- and those are exactly the rows this feature exists for.
@@ -241,46 +239,43 @@ describe('resumeUpload', () => {
     expect(rowOf('row-1').uploadId).toBeUndefined()
 
     useUploadStore.getState().resumeUpload('row-1', makeFile())
-    await vi.waitFor(() => expect(rowOf('row-1').status).toBe('processing'))
-
-    expect(rowOf('row-1').uploadId).toBe('u1')
+    expect(rowOf('row-1').status).toBe('interrupted')
+    expect(rowOf('row-1').uploadId).toBeUndefined()
     expect(rowOf('row-1').versionId).toBe(VERSION_ID)
   })
 
-  it('leaves a resumed row that breaks again resumable, not failed', async () => {
+  it('preserves a historical upload ID through rehydration', async () => {
     // The whole point of recording it: this is the same rehydration the fresh
     // upload paths already survive.
     vi.mocked(api.get).mockResolvedValue(resumeInfo({ held_part_numbers: [1, 2] }) as never)
     useUploadStore.getState().resumeUpload('row-1', makeFile())
-    await vi.waitFor(() => expect(rowOf('row-1').status).toBe('processing'))
+    expect(rowOf('row-1').status).toBe('interrupted')
 
     const opts = (useUploadStore as unknown as {
       persist: { getOptions: () => { merge?: (p: unknown, c: unknown) => { files: UploadFile[] } } }
     }).persist.getOptions()
-    const stored = { ...rowOf('row-1'), status: 'uploading' as const }
+    const stored = { ...rowOf('row-1'), uploadId: 'historical', status: 'uploading' as const }
     const [rehydrated] = opts.merge!({ files: [stored] }, { files: [] }).files
 
     expect(rehydrated.status).toBe('interrupted')
   })
 
-  it('reports no parts list when it skipped some', async () => {
+  it('does not submit an incomplete parts list', async () => {
     // The list is only read by a backend that cannot list its own parts, and a
     // resumed upload cannot produce a complete one: it never saw the ETags of
     // the parts it did not send. A partial list completes a truncated object
     // with no error on most backends. None makes such a backend refuse instead.
     useUploadStore.getState().resumeUpload('row-1', makeFile())
-    await vi.waitFor(() => expect(rowOf('row-1').status).toBe('processing'))
-
-    expect(completionBody().parts).toEqual([])
+    expect(rowOf('row-1').status).toBe('interrupted')
+    expect(api.post).not.toHaveBeenCalled()
   })
 
-  it('still reports a full parts list when nothing was skipped', async () => {
+  it('does not submit a parts list even when storage holds no parts', async () => {
     vi.mocked(api.get).mockResolvedValue(resumeInfo({ held_part_numbers: [] }) as never)
 
     useUploadStore.getState().resumeUpload('row-1', makeFile())
-    await vi.waitFor(() => expect(rowOf('row-1').status).toBe('processing'))
-
-    expect((completionBody().parts as unknown[]).length).toBe(3)
+    expect(rowOf('row-1').status).toBe('interrupted')
+    expect(api.post).not.toHaveBeenCalled()
   })
 
   it('refuses a file of a different size', async () => {
@@ -293,28 +288,29 @@ describe('resumeUpload', () => {
     expect(put).not.toHaveBeenCalled()
     // Short enough to survive the panel row's truncation, and it says what is
     // wrong rather than repeating the name of the file just picked.
-    expect(rowOf('row-1').error).toBe('File does not match original')
+    expect(rowOf('row-1').error).toBeUndefined()
+    expect(api.get).not.toHaveBeenCalled()
   })
 
-  it('refuses a file with a different name and names the one it wants', async () => {
+  it('refuses a renamed file without changing the historical error', async () => {
     useUploadStore.getState().resumeUpload('row-1', makeFile(TOTAL, 'other.mp4'))
     await vi.waitFor(() => expect(rowOf('row-1').status).toBe('interrupted'))
 
     expect(put).not.toHaveBeenCalled()
-    expect(rowOf('row-1').error).toBe('Please select clip.mp4')
+    expect(rowOf('row-1').error).toBeUndefined()
+    expect(api.get).not.toHaveBeenCalled()
   })
 
-  it('completes an already assembled upload without needing the file at all', async () => {
+  it('does not complete an assembled upload through the retired API', async () => {
     // CompleteMultipartUpload ran and only the status write is outstanding, so
     // there is nothing to send -- and refusing over a renamed file would strand
     // an upload that is whole.
     vi.mocked(api.get).mockResolvedValue(resumeInfo({ state: 'assembled' }) as never)
 
     useUploadStore.getState().resumeUpload('row-1', makeFile(1, 'renamed.mp4'))
-    await vi.waitFor(() => expect(rowOf('row-1').status).toBe('processing'))
-
+    expect(rowOf('row-1').status).toBe('interrupted')
     expect(put).not.toHaveBeenCalled()
-    expect(completionBody().parts).toEqual([])
+    expect(api.post).not.toHaveBeenCalled()
   })
 
   it('stays resumable when the transfer breaks again', async () => {
@@ -330,16 +326,17 @@ describe('resumeUpload', () => {
     expect(vi.mocked(api.post).mock.calls.some(([p]) => p === '/upload/abort')).toBe(false)
   })
 
-  it('is failed, not resumable, once the server says the upload is over', async () => {
+  it('does not request the retired parts endpoint to reinterpret a refusal', async () => {
     // A 409 is the server stating this version is no longer uploading. Offering
     // another resume would walk the user round the same loop.
     vi.mocked(api.get).mockRejectedValue(new ApiError(409, 'This upload is already failed.'))
 
     useUploadStore.getState().resumeUpload('row-1', makeFile())
-    await vi.waitFor(() => expect(rowOf('row-1').status).toBe('failed'))
+    expect(rowOf('row-1').status).toBe('interrupted')
+    expect(api.get).not.toHaveBeenCalled()
   })
 
-  it('reports an upload that already landed as landed, not as failed', async () => {
+  it('does not invent completion from a resume attempt', async () => {
     // `/parts` answers 409 for any status that is not `uploading`, which
     // includes `processing` and `ready`. Taken as final, that put a red Failed
     // badge reading "This upload is already ready." on a file that uploaded and
@@ -356,11 +353,12 @@ describe('resumeUpload', () => {
 
     useUploadStore.getState().resumeUpload('row-1', makeFile())
 
-    await vi.waitFor(() => expect(rowOf('row-1').status).toBe('complete'))
-    expect(rowOf('row-1').progress).toBe(100)
+    expect(rowOf('row-1').status).toBe('interrupted')
+    expect(rowOf('row-1').progress).toBe(0)
+    expect(api.get).not.toHaveBeenCalled()
   })
 
-  it('is still failed when the version really did fail', async () => {
+  it('leaves status reconciliation to read-only history polling', async () => {
     // The refusal is only worth a second question, not the benefit of the doubt.
     vi.mocked(api.get).mockImplementation((path: string) => {
       if (String(path).startsWith('/upload/')) {
@@ -373,7 +371,8 @@ describe('resumeUpload', () => {
     })
 
     useUploadStore.getState().resumeUpload('row-1', makeFile())
-    await vi.waitFor(() => expect(rowOf('row-1').status).toBe('failed'))
+    expect(rowOf('row-1').status).toBe('interrupted')
+    expect(api.get).not.toHaveBeenCalled()
   })
 
   it('stays resumable when the server merely could not be reached', async () => {
@@ -496,7 +495,7 @@ describe('discardUpload', () => {
 
 // ------------------------------------------------- the chunk size a fresh upload cuts on
 
-describe('a fresh upload and the pinned chunk size', () => {
+describe('retired new uploads ignore historical chunk settings', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     useUploadStore.setState({ files: [] })
@@ -521,7 +520,7 @@ describe('a fresh upload and the pinned chunk size', () => {
     })
   }
 
-  it('cuts on the size the server recorded, not on its own constant', async () => {
+  it('does not allocate or send a new upload', async () => {
     // The column the migration adds records what the browser used. If the
     // browser uses something else, `_pinned_chunk_size` trusts the record,
     // every held part is rejected as the wrong size, and the upload the
@@ -531,19 +530,17 @@ describe('a fresh upload and the pinned chunk size', () => {
     useUploadStore.getState().startUpload(makeFile(), 'project-1', 'clip')
 
     // 23 MB at 5 MB a part is five parts; at the client's own 10 MB it is three.
-    await vi.waitFor(() =>
-      expect(partsSentTo(put)).toEqual([1, 2, 3, 4, 5]),
-    )
+    expect(partsSentTo(put)).toEqual([])
+    expect(api.post).not.toHaveBeenCalled()
   })
 
-  it('does the same for a new version of an existing asset', async () => {
+  it('does not allocate or send a new version', async () => {
     mockInitiate(5 * MB)
 
     useUploadStore.getState().startVersionUpload(makeFile(), ASSET_ID, 'clip', 'project-1')
 
-    await vi.waitFor(() =>
-      expect(partsSentTo(put)).toEqual([1, 2, 3, 4, 5]),
-    )
+    expect(partsSentTo(put)).toEqual([])
+    expect(api.post).not.toHaveBeenCalled()
   })
 })
 
@@ -589,7 +586,8 @@ describe('refreshProcessingItems', () => {
 
     await useUploadStore.getState().refreshProcessingItems()
 
-    expect(rowOf('row-1').status).toBe('processing')
+    expect(rowOf('row-1').status).toBe('failed')
+    expect(rowOf('row-1').error).toContain('Server processing retired')
   })
 
   it('applies the one answer two rows on one asset share only to the version it is about', async () => {

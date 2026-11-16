@@ -1,11 +1,4 @@
-"""`/upload/abort` must not fail a version whose upload actually completed.
-
-`CompleteMultipartUpload` can succeed with the process dying before the status is
-committed. That leaves a fully assembled object and a version still reading
-`uploading`. The client fires abort from the catch of every completion failure, so
-without a check the version is marked failed, and the finished file is never
-transcoded, since nothing re-queues a failed version.
-"""
+"""Retired uploads stop without deleting assembled originals or publishing work."""
 import uuid
 from unittest.mock import MagicMock
 
@@ -38,6 +31,7 @@ def abort_rows(mock_db, test_user):
     media_file.file_size_bytes = 23 * MB
 
     # version lookup, then the media file lookup that pins the key being aborted
+    mock_db.with_for_update.return_value = mock_db
     mock_db.first.side_effect = [version, media_file]
     return version, media_file
 
@@ -50,21 +44,20 @@ def _abort(client, auth_headers):
     )
 
 
-def test_a_completed_upload_is_recorded_as_processing_not_failed(
+def test_a_completed_upload_is_stopped_without_deleting_its_original(
     client, auth_headers, mock_db, abort_rows, monkeypatch
 ):
-    """The whole point: the object is there, so this upload did not fail."""
-    version, _ = abort_rows
-    dispatched = []
+    version, media = abort_rows
+    dispose = MagicMock()
+    monkeypatch.setattr("apps.api.tasks.cleanup_tasks._dispose_version_files", dispose)
     monkeypatch.setattr(upload_module, "abort_multipart_upload",
                         lambda k, u: (_ for _ in ()).throw(_client_error("NoSuchUpload")))
-    monkeypatch.setattr(upload_module, "head_object_size", lambda k: 23 * MB)
-    monkeypatch.setattr(upload_module, "_trigger_processing", lambda a, v: dispatched.append(v))
 
     assert _abort(client, auth_headers).status_code == 204
-    assert version.processing_status == ProcessingStatus.processing
-    # It never got its transcode dispatched either, so do that now.
-    assert dispatched == [version.id]
+    assert version.processing_status == ProcessingStatus.failed
+    assert media.s3_key_raw == KEY
+    assert media.file_size_bytes == 23 * MB
+    dispose.assert_not_called()
 
 
 def test_a_genuinely_cancelled_upload_still_fails(
@@ -73,9 +66,6 @@ def test_a_genuinely_cancelled_upload_still_fails(
     """The ordinary case: nothing at the key, so this really did fail."""
     version, _ = abort_rows
     monkeypatch.setattr(upload_module, "abort_multipart_upload", lambda k, u: None)
-    monkeypatch.setattr(upload_module, "head_object_size", lambda k: None)
-    monkeypatch.setattr(upload_module, "_trigger_processing",
-                        lambda a, v: pytest.fail("nothing to process"))
 
     assert _abort(client, auth_headers).status_code == 204
     assert version.processing_status == ProcessingStatus.failed
@@ -84,10 +74,10 @@ def test_a_genuinely_cancelled_upload_still_fails(
 def test_a_partial_object_at_the_key_is_not_mistaken_for_success(
     client, auth_headers, mock_db, abort_rows, monkeypatch
 ):
-    """Size is the check, not mere existence."""
-    version, _ = abort_rows
+    """Retirement does not mark a partial upload ready."""
+    version, media = abort_rows
+    media.file_size_bytes = 10 * MB
     monkeypatch.setattr(upload_module, "abort_multipart_upload", lambda k, u: None)
-    monkeypatch.setattr(upload_module, "head_object_size", lambda k: 10 * MB)
 
     assert _abort(client, auth_headers).status_code == 204
     assert version.processing_status == ProcessingStatus.failed
@@ -99,11 +89,12 @@ def test_an_unreadable_head_object_does_not_claim_success(
     """Guessing wrong in this direction would report a missing upload as done."""
     version, _ = abort_rows
     monkeypatch.setattr(upload_module, "abort_multipart_upload", lambda k, u: None)
-    monkeypatch.setattr(upload_module, "head_object_size",
-                        lambda k: (_ for _ in ()).throw(_client_error("AccessDenied", "HeadObject")))
+    from apps.api.services.s3_service import get_s3_client as storage
+    storage.reset_mock()
 
     assert _abort(client, auth_headers).status_code == 204
     assert version.processing_status == ProcessingStatus.failed
+    storage.assert_not_called()
 
 
 def test_a_version_that_already_reached_processing_is_left_alone(
@@ -115,10 +106,9 @@ def test_a_version_that_already_reached_processing_is_left_alone(
     version.upload_id = "u-1"
     media_file = MagicMock()
     media_file.s3_key_raw = KEY
+    mock_db.with_for_update.return_value = mock_db
     mock_db.first.side_effect = [version, media_file]
     monkeypatch.setattr(upload_module, "abort_multipart_upload", lambda k, u: None)
-    monkeypatch.setattr(upload_module, "head_object_size",
-                        lambda k: pytest.fail("must not even ask"))
 
     assert _abort(client, auth_headers).status_code == 204
     assert version.processing_status == ProcessingStatus.processing

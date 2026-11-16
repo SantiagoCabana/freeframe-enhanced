@@ -190,41 +190,12 @@ def get_watermark_image_upload_url(
 
 # ── Apply Watermark ───────────────────────────────────────────────────────────
 
-@router.post("/assets/{asset_id}/apply-watermark", status_code=status.HTTP_202_ACCEPTED)
+@router.post("/assets/{asset_id}/apply-watermark")
 def apply_watermark_to_asset(
     asset_id: uuid.UUID,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    asset = db.query(Asset).filter(Asset.id == asset_id, Asset.deleted_at.is_(None)).first()
-    if not asset:
-        raise HTTPException(status_code=404, detail="Asset not found")
+    from ..services.media_processing import require_media_processing
 
-    require_project_role(db, asset.project_id, current_user, ProjectRole.editor)
-
-    wm = db.query(WatermarkSettings).filter(
-        WatermarkSettings.project_id == asset.project_id,
-        WatermarkSettings.share_link_id.is_(None),
-    ).first()
-    if not wm or not wm.enabled:
-        raise HTTPException(status_code=400, detail="Watermark not enabled")
-
-    # Resolve watermark text based on content type
-    if wm.content == "email":
-        watermark_text = current_user.email
-    elif wm.content == "name":
-        watermark_text = current_user.name or current_user.email
-    else:  # custom_text
-        watermark_text = wm.custom_text or ""
-
-    from ..tasks.watermark_tasks import apply_watermark
-    from ..tasks.celery_app import send_task_safe
-    send_task_safe(
-        apply_watermark,
-        str(asset_id),
-        watermark_text,
-        wm.position,
-        wm.opacity,
-        None,  # image_key not stored in model
-    )
-    return {"status": "watermark_queued"}
+    require_media_processing()

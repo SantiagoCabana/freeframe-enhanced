@@ -17,7 +17,6 @@ vi.mock('@/lib/api', async (importOriginal) => ({
 import { api, ApiError } from '@/lib/api'
 import { useUploadStore, __uploadQueueTesting } from '../upload-store'
 import type { UploadFile } from '../upload-store'
-import { installXhrFake } from '@/test/xhr-fake'
 import { signInAs } from '@/test/upload-session'
 
 // The upload queue is tab-wide module state: start every test from an empty one.
@@ -185,8 +184,6 @@ describe('the key a row carries', () => {
       if (path === '/upload/presign-part') return { presigned_url: 'https://store.test/part-1' } as never
       return {} as never
     })
-    // The part never lands, so the row stays mid-transfer.
-    installXhrFake(() => new Promise(() => {}))
   })
 
   afterEach(() => {
@@ -196,11 +193,9 @@ describe('the key a row carries', () => {
 
   const file = () => new File([new Uint8Array(8)], 'clip.mp4', { type: 'video/mp4' })
 
-  it('s3Key is recorded at initiate and survives a reload', async () => {
-    const id = useUploadStore.getState().startUpload(file(), 'project-1', 'clip')!
-
-    await vi.waitFor(() => expect(rowOf(id).s3Key).toBe(S3_KEY))
-    expect(rowOf(id).uploadId).toBe(UPLOAD_ID)
+  it('a historical key survives reload without starting another upload', async () => {
+    seedRow()
+    const id = 'row-1'
 
     // In shared storage, which is what the next page load reads.
     expect(storedFiles().find((f) => f.id === id)?.s3Key).toBe(S3_KEY)
@@ -209,18 +204,21 @@ describe('the key a row carries', () => {
 
     expect(rowOf(id).s3Key).toBe(S3_KEY)
     expect(rowOf(id).status).toBe('interrupted')
+    expect(api.post).not.toHaveBeenCalled()
   })
 
-  it('s3Key is recorded when a new version is initiated', async () => {
+  it('a refused new version cannot allocate a key or replace historical keys', () => {
+    seedRow()
     const id = useUploadStore.getState().startVersionUpload(
       file(), ASSET_ID, 'clip', 'project-1',
     )!
 
-    await vi.waitFor(() => expect(rowOf(id).s3Key).toBe(S3_KEY))
-    expect(storedFiles().find((f) => f.id === id)?.s3Key).toBe(S3_KEY)
+    expect(id).toBeNull()
+    expect(storedFiles().find((f) => f.id === 'row-1')?.s3Key).toBe(S3_KEY)
+    expect(api.post).not.toHaveBeenCalled()
   })
 
-  it('s3Key is recorded from /parts when an upload is resumed', async () => {
+  it('a refused resume cannot invent missing storage identifiers', () => {
     seedRow({ s3Key: undefined, uploadId: undefined, fileSize: 8 })
     vi.mocked(api.get).mockResolvedValue({
       state: 'resumable',
@@ -237,8 +235,8 @@ describe('the key a row carries', () => {
 
     useUploadStore.getState().resumeUpload('row-1', file())
 
-    await vi.waitFor(() => expect(rowOf('row-1').s3Key).toBe(S3_KEY))
-    expect(rowOf('row-1').uploadId).toBe(UPLOAD_ID)
-    expect(storedFiles().find((f) => f.id === 'row-1')?.s3Key).toBe(S3_KEY)
+    expect(rowOf('row-1').s3Key).toBeUndefined()
+    expect(rowOf('row-1').uploadId).toBeUndefined()
+    expect(api.post).not.toHaveBeenCalled()
   })
 })

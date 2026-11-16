@@ -70,7 +70,7 @@ services:
   # own S3 server by uncommenting the two services below, then:
   #   1. add `miniodata:` under the top-level `volumes:` (see bottom of file);
   #   2. add `depends_on: { minio: { condition: service_healthy } }` to
-  #      api / worker / email_worker / maintenance_worker / beat;
+  #      api / email_worker / maintenance_worker / beat;
   #   3. in .env.prod set:
   #        S3_STORAGE=minio
   #        S3_ENDPOINT=http://minio:9000
@@ -164,20 +164,6 @@ services:
       - traefik.http.services.api.loadbalancer.server.port=8000
     restart: unless-stopped
 
-  worker:
-    build:
-      context: .
-      dockerfile: apps/api/Dockerfile.prod
-    env_file:
-      - .env.prod
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    command: sh -c "celery -A apps.api.tasks.celery_app worker -Q transcoding -c $${TRANSCODING_CONCURRENCY:-2} --loglevel=$${CELERY_LOGLEVEL:-info}"
-    restart: unless-stopped
-
   email_worker:
     build:
       context: .
@@ -190,11 +176,7 @@ services:
     command: sh -c "celery -A apps.api.tasks.celery_app worker -Q email_high,email_low -c $${EMAIL_CONCURRENCY:-2} --loglevel=$${CELERY_LOGLEVEL:-info}"
     restart: unless-stopped
 
-  # Housekeeping: retention GC, stale-upload reaper, orphan sweep. (Watermarking
-  # runs on the transcoding worker, see apps/api/tasks/celery_app.py.)
-  # Kept off the transcoding worker (these hold a slot for minutes while a video
-  # waits) and off the email worker (a magic code queued behind a full bucket
-  # listing is a login someone is waiting on).
+  # Housekeeping stays separate from latency-sensitive email delivery.
   maintenance_worker:
     build:
       context: .

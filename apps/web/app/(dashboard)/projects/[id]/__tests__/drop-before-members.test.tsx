@@ -172,19 +172,18 @@ afterEach(() => {
   testing.reset()
 })
 
-describe('a drop before the role is known', () => {
-  it('takes a file drag over the asset area while the members request is out', () => {
+describe('retired project file drops regardless of role loading', () => {
+  it('does not advertise an upload drop target while membership loads', () => {
     render(page())
     const dataTransfer = { types: ['Files'], files: [], dropEffect: 'none' }
     const event = createEvent.dragOver(screen.getByTestId('grid'), { dataTransfer })
 
     fireEvent(screen.getByTestId('grid'), event)
 
-    expect(event.defaultPrevented).toBe(true)
-    expect(dataTransfer.dropEffect).toBe('copy')
+    expect(dataTransfer.dropEffect).not.toBe('copy')
   })
 
-  it('holds the drop and starts it once the members say editor', async () => {
+  it('does not resurrect a drop when membership resolves to editor', async () => {
     const { rerender } = render(page())
     dropFiles(screen.getByTestId('grid'), [take()])
     expect(rowNames()).toEqual([])
@@ -192,11 +191,11 @@ describe('a drop before the role is known', () => {
     members.data = [{ user_id: 'u1', role: 'editor' }]
     rerender(page())
 
-    await waitFor(() => expect(rowNames()).toEqual(['take-1.mov']))
+    await waitFor(() => expect(rowNames()).toEqual([]))
     expect(screen.queryByText(NO_PERMISSION)).toBeNull()
   })
 
-  it('holds the drop while the user is still loading, then starts it', async () => {
+  it('does not resurrect a drop when the owner signs in', async () => {
     auth.user = null
     auth.userFetched = false
     members.data = [{ user_id: 'u1', role: 'owner' }]
@@ -208,10 +207,10 @@ describe('a drop before the role is known', () => {
     auth.userFetched = true
     rerender(page())
 
-    await waitFor(() => expect(rowNames()).toEqual(['take-1.mov']))
+    await waitFor(() => expect(rowNames()).toEqual([]))
   })
 
-  it('answers a held drop with one toast and no rows once the members say viewer', () => {
+  it('does not allocate rows for a viewer', () => {
     const { rerender } = render(page())
     dropFiles(screen.getByTestId('grid'), [take()])
     dropFiles(screen.getByTestId('grid'), [take()])
@@ -220,21 +219,21 @@ describe('a drop before the role is known', () => {
     rerender(page())
 
     expect(rowNames()).toEqual([])
-    expect(screen.getAllByText(NO_PERMISSION)).toHaveLength(1)
+    expect(screen.queryByText('grid-folder')).toBeNull()
   })
 
-  it('hands a held drop to the queue when the members request fails, for the server to decide', async () => {
+  it('does not fall back to uploading when membership fails', async () => {
     const { rerender } = render(page())
     dropFiles(screen.getByTestId('grid'), [take()])
 
     members.error = new Error('network')
     rerender(page())
 
-    await waitFor(() => expect(rowNames()).toEqual(['take-1.mov']))
+    await waitFor(() => expect(rowNames()).toEqual([]))
     expect(screen.queryByText(NO_PERMISSION)).toBeNull()
   })
 
-  it('answers a held drop with one toast and no rows when the members request says not a member', () => {
+  it('does not expose folder upload targets to a non-member', () => {
     const { rerender } = render(page())
     dropFiles(screen.getByTestId('grid'), [take()])
     dropFiles(screen.getByTestId('grid'), [take()])
@@ -244,7 +243,7 @@ describe('a drop before the role is known', () => {
     rerender(page())
 
     expect(rowNames()).toEqual([])
-    expect(screen.getAllByText(NO_PERMISSION)).toHaveLength(1)
+    expect(screen.queryByText(NO_PERMISSION)).toBeNull()
 
     // The role is known now, so a later drag is refused like a viewer's.
     const dataTransfer = { types: ['Files'], files: [], dropEffect: 'none' }
@@ -255,7 +254,7 @@ describe('a drop before the role is known', () => {
     expect(screen.queryByText('sidebar-folder')).toBeNull()
   })
 
-  it('answers a held drop with "Sign in to upload" when the user fetch ends with no user', async () => {
+  it('does not queue unauthenticated drops', async () => {
     signOutElsewhere()
     auth.user = null
     auth.userFetched = false
@@ -267,10 +266,10 @@ describe('a drop before the role is known', () => {
     rerender(page())
 
     expect(rowNames()).toEqual([])
-    expect(await screen.findAllByText('Sign in to upload')).toHaveLength(1)
+    expect(screen.queryByText('grid-folder')).toBeNull()
   })
 
-  it('starts a held drop as the account that made it, not one signed in since', async () => {
+  it('does not transfer a dropped file to a different account', async () => {
     const { rerender } = render(page())
     dropFiles(screen.getByTestId('grid'), [take()])
 
@@ -279,19 +278,21 @@ describe('a drop before the role is known', () => {
     members.data = [{ user_id: 'u1', role: 'editor' }]
     rerender(page())
 
-    expect(await screen.findByText(ACCOUNT_CHANGED)).toBeTruthy()
+    expect(screen.queryByText(ACCOUNT_CHANGED)).toBeNull()
     expect(useUploadStore.getState().files).toEqual([])
   })
 
-  it('holds drops on grid and sidebar folders too, then starts them once the members say editor', async () => {
+  it('keeps grid and sidebar file drops disabled after membership resolves', async () => {
     const { rerender } = render(page())
-    fireEvent.click(screen.getByText('grid-folder'))
-    fireEvent.click(screen.getByText('sidebar-folder'))
+    expect(screen.queryByText('grid-folder')).toBeNull()
+    expect(screen.queryByText('sidebar-folder')).toBeNull()
     expect(rowNames()).toEqual([])
 
     members.data = [{ user_id: 'u1', role: 'editor' }]
     rerender(page())
 
-    await waitFor(() => expect(rowNames().sort()).toEqual(['grid-folder.mov', 'sidebar-folder.mov']))
+    expect(screen.queryByText('grid-folder')).toBeNull()
+    expect(screen.queryByText('sidebar-folder')).toBeNull()
+    expect(rowNames()).toEqual([])
   })
 })

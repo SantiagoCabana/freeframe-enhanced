@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fork deployment defaults
+- Server multimedia processing and the `worker` service are retired. New web media uploads, metadata processing and burnt-in watermark generation return explicit retirement errors. Prepare videos with Electron/Ingest; existing media, review overlays, email and maintenance remain supported. See [upgrade and rollback notes](docs/media-preparation.md).
+- HLS-only videos offer a streaming ZIP download of their playlist graph. An original is offered only when stored; no server conversion to MP4 is performed.
+- Public share validation now allows 600 requests per IP per minute; the higher limit permits more attempts against shared links.
+- Legacy transcoder code retains the 720p/360p ladder and CPU `veryfast` preset for reference, but no multimedia jobs execute in this fork.
+- Database pool connections are checked before reuse to reduce errors from stale connections. A disconnection during a transaction can still fail the request.
+- The production API image creates a writable home directory for Gunicorn's control socket.
+- Maintenance preserves HLS version trees and resumable uploads created by the separate Ingest service.
+
 ### Upgrade notes
 - **On a capped instance, read this before you upgrade: uploads can start being refused straight after it, and deleting will no longer make room.** `alembic upgrade head` adds `media_files.derived_size_bytes`, nullable with no default, so existing media reads as "not measured" rather than as zero; the same migration adds `uq_media_files_version_id`, which makes explicit what every write path has always done, one media file per version, and names the versions and stops if your database somehow holds two, because the figure is measured per output prefix and would otherwise be counted twice. A refused migration changes nothing, because it runs in one transaction, and says which row to keep. It is also a new Celery task on the `maintenance` queue, so recreate the maintenance worker together with the API; a worker still running the old code does not know the task, so it rejects a queued backfill and that run is lost, and recreating the worker afterwards does not bring it back; trigger the backfill again once the worker is recreated. An instance with no storage limit (`storage_limit_bytes` of `0`) is unaffected by everything below. On one with a limit, three things change, and the first two need no backfill to bite.
 

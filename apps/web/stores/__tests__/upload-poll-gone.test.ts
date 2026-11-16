@@ -142,7 +142,7 @@ describe('the poll when the asset is gone', () => {
     expect(pollIntervalFor(useUploadStore.getState().files)).toBe(0)
   })
 
-  it('leaves a row on an asset that still answers alone when its neighbour is gone', async () => {
+  it('distinguishes retired processing from a missing asset and stops polling both', async () => {
     useUploadStore.setState({
       files: [
         seedRow({ id: 'row-1', assetId: 'asset-gone', versionId: 'v1' }),
@@ -156,7 +156,8 @@ describe('the poll when the asset is gone', () => {
     await tick()
 
     expect(rowOf('row-1')).toMatchObject({ status: 'failed', error: GONE_MESSAGE })
-    expect(rowOf('row-2').status).toBe('processing')
-    expect(rowOf('row-2').error).toBeUndefined()
+    expect(rowOf('row-2').status).toBe('failed')
+    expect(rowOf('row-2').error).toContain('Server processing retired')
+    expect(pollIntervalFor(useUploadStore.getState().files)).toBe(0)
   })
 })

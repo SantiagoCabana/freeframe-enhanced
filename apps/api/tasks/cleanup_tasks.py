@@ -346,10 +346,15 @@ def _reap_stale_uploads(db) -> int:
     # A `failed` version whose master is still in storage is kept: it stays until
     # someone deletes it, and then goes through the soft-delete retention like
     # anything else.
-    versions = [
-        v for v in candidates
-        if v.processing_status != ProcessingStatus.failed or not _holds_a_master(db, v)
-    ]
+    versions = []
+    for v in candidates:
+        media = db.query(MediaFile).filter(MediaFile.version_id == v.id).all()
+        # Ingest manages resumable HLS uploads independently of multipart uploads.
+        if any(mf.s3_key_raw and mf.s3_key_raw.startswith("processed/")
+               and mf.s3_key_raw.endswith("/master.m3u8") for mf in media):
+            continue
+        if v.processing_status != ProcessingStatus.failed or not _holds_a_master(db, v):
+            versions.append(v)
     for v in versions:
         _dispose_version_files(db, v)
     db.flush()
@@ -505,65 +510,9 @@ def _run_cleanup(db) -> PurgeCounts:
 
 @celery_app.task(name="requeue_stuck_processing")
 def requeue_stuck_processing():
-    """Re-dispatch transcodes for versions claimed as `processing` that never ran.
-
-    /upload/complete claims the version and *then* schedules the dispatch on a
-    background thread whose failures are swallowed into a log line. A broker
-    outage, or an API worker recycled between the two, leaves a version at
-    `processing` with no task behind it. Nothing recovered that: the stale-upload
-    reaper filters on `uploading` and `failed` only, so the bytes kept counting
-    against the storage cap and the upload sat in the panel's Active tab forever.
-
-    This re-dispatches rather than condemning. Marking such a version `failed`
-    would be worse than leaving it: CompleteMultipartUpload has already run by
-    then, so the raw object is fully assembled, and nothing ever re-queues a
-    `failed` version -- a twenty-second broker restart after a large upload would
-    leave that master untranscoded for good.
-    """
-    hours = settings.stuck_processing_timeout_hours
-    if hours <= 0:
-        log.warning("requeue: disabled (stuck_processing_timeout_hours=%s)", hours)
-        return 0
-
-    # The cutoff must clear the transcoder's own 4-hour ceiling, or a legitimately
-    # slow encode gets a second worker started on top of the one still running.
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=hours)
-    from .celery_app import send_task_safe
-    from .transcode_tasks import process_asset
-
-    db = SessionLocal()
-    try:
-        stuck = db.query(AssetVersion).filter(
-            AssetVersion.processing_status == ProcessingStatus.processing,
-            AssetVersion.deleted_at.is_(None),
-            func.coalesce(AssetVersion.last_activity_at, AssetVersion.created_at) < cutoff,
-        ).all()
-
-        requeued = 0
-        for v in stuck:
-            # A version whose output is already written finished its transcode and
-            # simply never had its status updated. Re-running it would redo hours
-            # of work to reach the same bytes, so treat the output as the truth.
-            done = db.query(MediaFile).filter(
-                MediaFile.version_id == v.id,
-                MediaFile.s3_key_processed.isnot(None),
-            ).first()
-            if done is not None:
-                v.processing_status = ProcessingStatus.ready
-                log.info("requeue: version %s already had output; marking ready", v.id)
-                continue
-
-            send_task_safe(process_asset, str(v.asset_id), str(v.id))
-            log.info("requeue: re-dispatched transcode for version %s", v.id)
-            requeued += 1
-
-        db.commit()
-        if stuck:
-            log.info("requeue: %s stuck, %s re-dispatched", len(stuck), requeued)
-        return requeued
-    finally:
-        db.close()
-
+    # Historical beat messages must not revive retired processing or mutate rows.
+    log.warning("Ignoring retired requeue_stuck_processing task")
+    return 0
 
 @celery_app.task(name="cleanup_soft_deleted")
 def cleanup_soft_deleted():
@@ -613,7 +562,7 @@ def _sweep_orphan_s3(db) -> OrphanSweepCounts:
     (0 disables) are considered. Read-only on the DB (no commit). A key is LIVE if it is a
     MediaFile.s3_key_raw / s3_key_thumbnail / s3_key_download, or lives under
     processed/{project_id}/{asset_id}/{version_id}/ (= the transcode output_prefix) for some MediaFile
-    — derived from the raw key `raw/{project_id}/{asset_id}/{version_id}/...`. MediaFile is queried
+    — derived from a raw key under `raw/` or an Ingest master under `processed/`. MediaFile is queried
     UNFILTERED on purpose: a soft-deleted-but-not-yet-purged asset still owns its S3 and belongs to
     the retention GC, not here. The download MP4 is written under the processed prefix and so is
     already covered by that rule; it is named as well so that a row whose raw key is missing or
@@ -635,6 +584,8 @@ def _sweep_orphan_s3(db) -> OrphanSweepCounts:
             parts = raw.split("/")  # raw/{project_id}/{asset_id}/{version_id}/original.ext
             if len(parts) >= 4 and parts[0] == "raw":
                 processed_roots.add("processed/" + "/".join(parts[1:4]) + "/")
+            elif len(parts) == 5 and parts[0] == "processed" and parts[4] == "master.m3u8":
+                processed_roots.add("/".join(parts[:4]) + "/")
         if thumb:
             exact_live.add(thumb)
         if download:

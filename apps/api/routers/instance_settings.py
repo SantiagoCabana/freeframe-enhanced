@@ -11,6 +11,7 @@ from ..models.instance_settings import InstanceSettings
 from ..routers.users import require_admin
 from ..schemas.instance_settings import InstanceSettingsUpdate, InstanceSettingsResponse
 from ..services import storage as storage_service
+from ..services.media_processing import require_media_processing
 
 router = APIRouter(tags=["instance_settings"])
 
@@ -34,32 +35,8 @@ def get_or_create_instance_settings(db: Session) -> InstanceSettings:
     return row
 
 
-def effective_crf_offset(row: InstanceSettings | None) -> int:
-    """The CRF offset the next transcode will use.
-
-    The chosen level when there is one, and `TRANSCODER_CRF_OFFSET` when there
-    is not. It reproduces the precedence the job path applies, through the two
-    helpers that path itself ends up in: `crf_offset_for_level`, which maps the
-    level when a job is enqueued (`apps/api/tasks/transcode_tasks.py`), and
-    `get_crf_offset`, which the worker's `job_crf_offset` falls back to when no
-    level is set. So the number the settings page shows is the number the
-    encoder gets.
-    """
-    # Imported here, as everything else under `apps/api` imports the transcoder
-    # package: it pulls in the ffmpeg backend detection, which has no business
-    # running when the API module is merely imported.
-    from packages.transcoder.base import crf_offset_for_level
-    from packages.transcoder.ffmpeg_transcoder import get_crf_offset
-
-    chosen = crf_offset_for_level(row.compression_level if row else None)
-    return chosen if chosen is not None else get_crf_offset()
-
-
 def _build_response(db: Session, row: InstanceSettings | None, user: User) -> InstanceSettingsResponse:
     """`row` is None before the first PUT creates it, which reads as the defaults."""
-    from packages.transcoder.base import level_for_crf_offset
-
-    offset = effective_crf_offset(row) if user.is_superadmin else None
     return InstanceSettingsResponse(
         storage_limit_bytes=row.storage_limit_bytes if row else 0,
         storage_used_bytes=storage_service.instance_storage_used_bytes(db),
@@ -68,16 +45,6 @@ def _build_response(db: Session, row: InstanceSettings | None, user: User) -> In
         ),
         allow_original_downloads=(
             (row.allow_original_downloads if row else False) if user.is_superadmin else None
-        ),
-        compression_level=(
-            (row.compression_level if row else None) if user.is_superadmin else None
-        ),
-        compression_crf_offset=offset,
-        # The step the effective offset sits on, computed from the one scale in
-        # packages/transcoder/base.py. None when no step names the offset,
-        # which is how the UI knows to say so.
-        compression_level_effective=(
-            level_for_crf_offset(offset) if offset is not None else None
         ),
     )
 
@@ -106,19 +73,13 @@ def update_instance_settings(
     current_user: User = Depends(require_admin),
 ):
     """Admin only: update instance settings."""
+    if body.model_fields_set & {"compression_level", "upload_part_size_bytes"}:
+        require_media_processing()
     row = get_or_create_instance_settings(db)
     if body.storage_limit_bytes is not None:
         row.storage_limit_bytes = body.storage_limit_bytes
-    if body.upload_part_size_bytes is not None:
-        row.upload_part_size_bytes = body.upload_part_size_bytes
     if body.allow_original_downloads is not None:
         row.allow_original_downloads = body.allow_original_downloads
-    # Presence of the key, not `is not None`, and only for this field: null is
-    # a real instruction here ("go back to following TRANSCODER_CRF_OFFSET"),
-    # which is why the column is nullable. Without it the setting is a one-way
-    # door only psql can reopen. The other fields keep "null leaves it alone".
-    if "compression_level" in body.model_fields_set:
-        row.compression_level = body.compression_level
     db.commit()
     db.refresh(row)
     return _build_response(db, row, current_user)

@@ -2,6 +2,20 @@
 
 This guide covers deploying FreeFrame to a production server using Docker Compose.
 
+## Fork: externally prepared media
+
+This fork no longer runs the multimedia `worker` or FFmpeg. Electron prepares
+videos locally and the separate Ingest service records them in the shared
+database and object store. See [media preparation and upgrade procedure](media-preparation.md)
+before changing an existing deployment. Email, maintenance and Beat still run.
+
+The upstream installation URLs, published images, GPU instructions and historical
+upgrade procedures below are retained as upstream/rollback reference: they do
+not install this fork's changes. Build the reviewed fork revision for a fork
+deployment; a release containing these changes has not been published. Do not
+run metadata backfills or start a transcoding worker with this revision.
+Existing Dokploy startup patches must be removed when an upgrade is authorized.
+
 ---
 
 ## Install on a fresh server
@@ -707,7 +721,7 @@ All environment variables are documented in [`.env.example`](../.env.example). K
 | `TRANSCODER_PIPELINE` | GPU backend: `Auto`, `NVIDIA`, `Intel`, or `Software` | `Auto` |
 | `TRANSCODER_OUTPUT` | Output codec: `h264_8` (broad compatibility) or `h265_10` (HEVC 10-bit) | `h264_8` |
 | `TRANSCODER_HDR` | `convert` (tone-map HDR to SDR) or `preserve` (keep HDR tags) | `convert` |
-| `TRANSCODER_QUALITIES` | Ladder rungs to build: any of `2160p`, `1080p`, `720p`, `360p`. A rung names the source's short side, so portrait video is sized like landscape (1080x1920 under `1080p` keeps its size). Rungs above the source are dropped, and if that leaves none the smallest is built at the source's own size, so `2160p` alone gives one rendition at source size for anything up to 4K | `1080p,720p,360p` |
+| `TRANSCODER_QUALITIES` | Ladder rungs to build: any of `2160p`, `1080p`, `720p`, `360p`. A rung names the source's short side, so portrait video is sized like landscape (1080x1920 under `1080p` keeps its size). Rungs above the source are dropped, and if that leaves none the smallest is built at the source's own size, so `2160p` alone gives one rendition at source size for anything up to 4K | `720p,360p` |
 | `TRANSCODER_CRF_OFFSET` | Fallback for the **Compression** slider in Admin Dashboard → Instance settings → Review streams, which sets the same thing in the app and wins once an admin has moved it, and which an admin can hand back with **Use server default**. A whole number of CRF steps from `-12` to `12`; negative is better quality and bigger files, and about six steps is a doubling of bitrate. `0` leaves the encode byte-identical to what it was. The ladder's own numbers suit ordinary review footage; graded work with large dark gradients bands visibly at the default top rung of CRF 24, and `-8` puts the default software x264 8-bit ladder on CRF 16 / 18 / 22 (the slider's *Highest quality*); measured on one 1080p dark-gradient master, its top rung went from about 0.8 to about 1.5 Mbit/s. Those numbers are the **default software x264 8-bit ladder**: a 10-bit `TRANSCODER_OUTPUT` (`h265_10`) already encodes 8 CRF steps lower, so `-8` means CRF 8 / 10 / 14 there, and the hardware backends start from their own numbers (`-global_quality` 12 / 14 / 18 on QSV and VAAPI, and NVENC shifts its constant qp). It shifts every backend by the same number of steps, whatever quality option that backend uses (CRF on libx264/libx265, `-global_quality` on QSV and VAAPI, `-qp` on NVENC); a negative value additionally switches software H.264 to `-aq-mode 3`, which biases bits toward dark areas, and no `-aq-mode` is added at `0` and above. Only new transcodes are affected; existing videos keep their renditions until a new version is uploaded. Changing it needs both the `api` and the `worker` container recreated, because each reads the environment at start. An unusable value is logged and ignored | `0` |
 | `TRANSCODER_AUDIO_BITRATE` | AAC bitrate for the audio of video review streams, as `<n>k` between `64k` and `512k` (for example `320k` for music and final-mix review). Empty leaves ffmpeg's own choice, AAC-LC at about 128 kb/s for stereo. The value is the total for all channels, and ffmpeg's default for a surround source is already higher (about 341 kb/s for 5.1 and 469 kb/s for 7.1), so a stereo-sized value such as `320k` lowers surround quality. The codec is always AAC-LC, the one every browser plays over HLS. Applies to every rendition, so storage grows by the extra bitrate times the number of rungs. A source-copied upload whose audio is already AAC keeps its own audio untouched; non-AAC audio in a copy is encoded at this bitrate, or `192k` when it is empty. An unusable value is logged and ignored | *(empty)* |
 | `TRANSCODER_SOURCE_COPY` | Package an already browser-safe source into HLS without re-encoding, where the ladder above resolves to one rendition at the source's own size | `false` |
@@ -731,7 +745,7 @@ The `API_WORKERS` env var controls how many gunicorn worker processes handle API
 API_WORKERS = (2 x CPU cores) + 1
 ```
 
-### Transcoding Workers
+### Transcoding Workers (historical upstream only)
 
 Video transcoding is CPU-intensive. Adjust `TRANSCODING_CONCURRENCY` based on your server:
 
@@ -741,7 +755,7 @@ Video transcoding is CPU-intensive. Adjust `TRANSCODING_CONCURRENCY` based on yo
 | 4 cores | 2-3 |
 | 8+ cores | 4-6 |
 
-### Hardware-Accelerated Transcoding (optional)
+### Hardware-Accelerated Transcoding (historical upstream only)
 
 FreeFrame can use an NVIDIA (NVENC) or Intel (VAAPI) GPU to transcode faster, and
 automatically falls back to software (CPU) transcoding if no GPU is present or a
@@ -882,11 +896,14 @@ subscriber is silently never executed. The shipped topology is:
 
 | Queue | Consumed by | Carries |
 |-------|-------------|---------|
-| `transcoding` | `worker` | Video/audio/image processing, metadata backfill, watermarking |
 | `email_high` | `email_worker` | Magic codes, invites |
 | `email_low` | `email_worker` | Mentions, comments, approvals, share notices |
 | `maintenance` | `maintenance_worker` | Retention GC, stale-upload reaper, orphan sweep |
-| `default` | nobody, by design | Should always be empty |
+| `maintenance` (default route) | `maintenance_worker` | Tasks without an explicit route |
+
+Historical `transcoding` and `default` messages are not consumed or purged by
+this upgrade. Inventory them before upgrading; their existence does not justify
+restarting an old multimedia worker against the shared database.
 
 If you add a task, route it in `apps/api/tasks/celery_app.py` to one of the
 consumed queues. `apps/api/tests/test_celery_queue_topology.py` fails if a
@@ -968,6 +985,31 @@ Database migrations run automatically on API startup. Always check the [CHANGELO
 
 ### Upgrading past the maintenance-queue fix ([#240](https://github.com/Techiebutler/freeframe/issues/240))
 
+**Dokploy deployments with custom startup patches:** building this fork alone does
+not remove commands saved in Dokploy's raw Compose. Before upgrading, review the
+effective Compose and replace API and worker Python text-replacement patches with
+normal startup commands. In particular, an old worker patch looking for the
+1080p/720p/360p default will fail against this fork's 720p/360p default and can
+leave the worker restarting. Preserve the existing environment, networks, volumes,
+storage and database configuration; do not apply this change without reviewing
+the complete Compose and taking a backup. Check that workers consume their queues
+and that exactly one Beat scheduler publishes the schedule.
+
+Inspect the effective `SOFT_DELETE_RETENTION_DAYS` before starting maintenance:
+`1` permanently purges eligible data after one day, not the example default of 30;
+`0` disables this cleanup. Changing the code does not override an existing value.
+For a separate Ingest service using `processed/{project}/{asset}/{version}/master.m3u8`
+as its raw key, the orphan sweep preserves that version's HLS tree and the stale-upload
+reaper leaves its uploads to Ingest. Recreate the maintenance worker to apply this
+protection. This does not change retention purges or Ingest's own cleanup; review both
+and keep orphan deletion disabled until the deployed Ingest layout is verified.
+If maintenance tasks appear repeatedly, investigate their producers and backlog;
+do not purge a Redis database or queue, which may contain legitimate work.
+
+Database connections are checked before checkout, which helps with stale idle
+connections but cannot recover an interrupted transaction or an unavailable
+PostgreSQL server. Investigate server and network errors separately.
+
 Before this fix, no worker consumed the `default` queue, so the retention GC,
 the stale-upload reaper, the orphan sweeper, due-date reminders and
 `apply_watermark` were published and never executed. This release adds a
@@ -1026,7 +1068,9 @@ draining normally.
 
 ### Upgrading past the media-metadata fix ([#124](https://github.com/Techiebutler/freeframe/issues/124))
 
-If you're upgrading past the media-metadata fix ([#124](https://github.com/Techiebutler/freeframe/issues/124)), backfill missing `duration_seconds`/`width`/`height`/`fps` on already-processed files with: `docker exec freeframe-api-1 python -m apps.api.scripts.backfill_media_metadata`. The backfill runs as a Celery task on the `transcoding` queue, so it occupies one worker slot and can run long on large libraries (up to ~300s per file); new uploads keep transcoding normally on the remaining slots.
+The upstream metadata backfill is retired in this fork. Existing metadata remains
+readable; new metadata must come from the media preparation client. The old script
+exits with an explanation and does not enqueue work.
 
 ### Upgrading past the storage image switch ([#461](https://github.com/Techiebutler/freeframe/issues/461))
 

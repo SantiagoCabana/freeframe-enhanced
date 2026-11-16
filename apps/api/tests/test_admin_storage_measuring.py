@@ -126,12 +126,10 @@ def test_the_measurement_listings_are_bounded_and_the_sweep_keeps_the_shared_cli
 
 
 @pytest.mark.parametrize(
-    "fails", [False, True], ids=["stores what it wrote", "failure is not fatal"],
+    "fails", [False, True], ids=["storage available", "storage unavailable"],
 )
-def test_the_transcode_records_its_output_and_survives_a_failed_listing(monkeypatch, fails):
-    """The output is already in the bucket, so a transcode must not be marked failed
-    because the bookkeeping listing timed out. The row stays unmeasured until somebody
-    runs the backfill; nothing picks it up on its own."""
+def test_retired_transcode_leaves_storage_measurement_to_maintenance(monkeypatch, fails):
+    """An old job cannot write measurements, regardless of storage availability."""
     from unittest.mock import MagicMock
     from apps.api.tasks import transcode_tasks
     media_file = MagicMock(derived_size_bytes=None, version_id=uuid.uuid4())
@@ -142,16 +140,14 @@ def test_the_transcode_records_its_output_and_survives_a_failed_listing(monkeypa
             raise RuntimeError("ListObjectsV2 timed out")
         return 7_777_777
     monkeypatch.setattr("apps.api.services.s3_service.prefix_size_bytes", _size)
-    transcode_tasks._record_derived_size(db, media_file, "processed/p/a/v")
-    assert media_file.derived_size_bytes == (None if fails else 7_777_777)
-    assert db.flush.called is not fails
+    with pytest.raises(RuntimeError, match="retired"):
+        transcode_tasks.process_asset.run(str(uuid.uuid4()), str(media_file.version_id))
+    assert media_file.derived_size_bytes is None
+    db.flush.assert_not_called()
 
 
-def test_process_asset_measures_before_it_marks_the_version_ready(monkeypatch):
-    """Order matters: `ready` is what makes a version count towards storage, so the
-    measurement has to be on the row before the status flips, in the same commit, at
-    the prefix the transcoder writes to. Every status change goes into the same list as
-    the transcode and the measurement, so swapping the two lines fails here."""
+def test_retired_process_asset_cannot_change_status_or_storage_counters(monkeypatch):
+    """Historical jobs leave existing versions intact; maintenance retains the layout."""
     from unittest.mock import MagicMock
     from apps.api.tasks import transcode_tasks
     order = []
@@ -176,22 +172,12 @@ def test_process_asset_measures_before_it_marks_the_version_ready(monkeypatch):
     media_file = MagicMock(derived_size_bytes=None, version_id=version.id)
     db = MagicMock()
     db.query.return_value.filter.return_value.first.side_effect = [version, asset, media_file]
-    monkeypatch.setattr(
-        transcode_tasks, "_record_derived_size",
-        lambda _db, mf, prefix: order.append(("measured", prefix)),
-    )
-    monkeypatch.setattr(
-        transcode_tasks, "_process_image", lambda *a, **k: order.append(("transcoded",)),
-    )
-    monkeypatch.setattr(transcode_tasks, "_publish_event", lambda *a, **k: True)
-    monkeypatch.setattr(transcode_tasks, "SessionLocal", lambda: db)
-    monkeypatch.setattr("apps.api.services.s3_service.get_s3_client", lambda: MagicMock())
-    transcode_tasks.process_asset.run(str(asset.id), str(version.id))
-    assert [o[0] for o in order] == ["status", "transcoded", "measured", "status"]
-    assert [o[1] for o in order if o[0] == "status"] == [
-        ProcessingStatus.processing, ProcessingStatus.ready,
-    ]
-    assert order[2][1] == storage_tasks.output_prefix_for(
+    monkeypatch.setattr("apps.api.database.SessionLocal", lambda: db)
+    with pytest.raises(RuntimeError, match="retired"):
+        transcode_tasks.process_asset.run(str(asset.id), str(version.id))
+    assert order == []
+    db.query.assert_not_called()
+    assert storage_tasks.output_prefix_for(
         asset.project_id, asset.id, version.id,
     ) == f"processed/{asset.project_id}/{asset.id}/{version.id}"
 

@@ -87,10 +87,11 @@ afterEach(() => {
 // ---------------------------------------------------------------- what a row says
 
 describe('what a queued row says', () => {
-  it('queued rows show Waiting to start and no progress bar', async () => {
-    const server = fakeServer(() => 'wait', 'hang')
-    const [a] = drop([fileOf('a.mov'), fileOf('b.mov')])
-    await settle()
+  it('historical queued rows show their saved state without restarting transfers', async () => {
+    useUploadStore.setState({ files: [
+      row({ id: 'a', assetName: 'a', status: 'starting' }),
+      row({ id: 'b', assetName: 'b', status: 'queued' }),
+    ] })
     openPanel()
 
     // b has not had its turn: nothing on the server, nothing to measure.
@@ -102,25 +103,14 @@ describe('what a queued row says', () => {
     expect(within(rowNamed('a')).getByText('Starting…')).toBeInTheDocument()
     expect(within(rowNamed('a')).queryByRole('progressbar')).toBeNull()
 
-    // And the bar is there once bytes are going (the query would find it).
-    await act(async () => {
-      server.initiates[0].resolve()
-      await settle()
-    })
-    expect(rowOf(a).status).toBe('uploading')
-    expect(within(rowNamed('a')).getByRole('progressbar')).toBeInTheDocument()
-    expect(within(rowNamed('b')).getByText('Waiting to start')).toBeInTheDocument()
-    expect(within(rowNamed('b')).queryByRole('progressbar')).toBeNull()
+    expect(api.post).not.toHaveBeenCalled()
   })
 
   it('the probe row shows Waiting for storage', async () => {
-    fakeServer((_, i) => (
-      i === 0
-        ? new ApiError(503, 'Storage is not answering', { code: 'storage_unavailable', retryAfter: 5 })
-        : 'wait'
-    ))
-    drop([fileOf('a.mov'), fileOf('b.mov')])
-    await settle()
+    useUploadStore.setState({ files: [
+      row({ id: 'a', assetName: 'a', status: 'queued', holdReason: 'storage' }),
+      row({ id: 'b', assetName: 'b', status: 'queued' }),
+    ] })
     openPanel()
 
     // a's initiate was answered with a hold: it is the probe, and it is the one
@@ -131,9 +121,10 @@ describe('what a queued row says', () => {
   })
 
   it('the probe row shows Waiting for connection when the request never arrived', async () => {
-    fakeServer((_, i) => (i === 0 ? new TypeError('Failed to fetch') : 'wait'))
-    drop([fileOf('a.mov'), fileOf('b.mov')])
-    await settle()
+    useUploadStore.setState({ files: [
+      row({ id: 'a', assetName: 'a', status: 'queued', holdReason: 'connection' }),
+      row({ id: 'b', assetName: 'b', status: 'queued' }),
+    ] })
     openPanel()
 
     expect(within(rowNamed('a')).getByText('Waiting for connection')).toBeInTheDocument()
@@ -205,18 +196,16 @@ describe('the panel header', () => {
   const header = () => screen.getByRole('heading', { name: /^Uploads/ })
 
   it('counts the files running apart from the ones waiting: "3 active · 2 queued"', async () => {
-    fakeServer(() => 'wait')
-    drop([small('a.jpg'), small('b.jpg'), small('c.jpg'), small('d.jpg'), small('e.jpg')])
-    await settle()
+    useUploadStore.setState({ files: ['a', 'b', 'c', 'd', 'e'].map((id, i) => row({
+      id, assetName: id, status: i < 3 ? 'starting' : 'queued',
+    })) })
     openPanel()
 
     expect(header()).toHaveTextContent(/^Uploads3 active · 2 queued$/)
   })
 
   it('says only "N active" with nothing queued, and only "N queued" with nothing running', async () => {
-    const server = fakeServer(() => 'wait')
-    drop([small('a.jpg'), small('b.jpg')])
-    await settle()
+    useUploadStore.setState({ files: ['a', 'b'].map((id) => row({ id, status: 'starting' })) })
     const { unmount } = openPanel()
     expect(header()).toHaveTextContent(/^Uploads2 active$/)
     unmount()
@@ -224,7 +213,7 @@ describe('the panel header', () => {
     useUploadStore.setState({ files: [row({ id: 'r', status: 'interrupted', queuedResume: true, versionId: 'rv' })] })
     openPanel()
     expect(header()).toHaveTextContent(/^Uploads1 queued$/)
-    expect(server.names()).toEqual(['a.jpg', 'b.jpg'])
+    expect(api.post).not.toHaveBeenCalled()
   })
 })
 
@@ -263,9 +252,9 @@ describe('when a finished row says it finished', () => {
 
 describe('the order of the rows', () => {
   it('rows of one drop list in start order', async () => {
-    fakeServer(() => 'wait')
-    drop([fileOf('a.mov'), fileOf('b.mov'), fileOf('c.mov')])
-    await settle()
+    useUploadStore.setState({ files: ['c', 'b', 'a'].map((id, i) => row({
+      id, assetName: id, status: 'queued', dropSeq: 1, queueSeq: 3 - i,
+    })) })
     openPanel()
 
     // Newest first is how the store keeps them (c, b, a); the panel lists the
@@ -274,10 +263,9 @@ describe('the order of the rows', () => {
   })
 
   it('two drops list newest drop first', async () => {
-    fakeServer(() => 'wait')
-    drop([fileOf('a.mov'), fileOf('b.mov')])
-    drop([fileOf('c.mov'), fileOf('d.mov')])
-    await settle()
+    useUploadStore.setState({ files: ['a', 'b', 'c', 'd'].map((id, i) => row({
+      id, assetName: id, status: 'queued', dropSeq: i < 2 ? 1 : 2, queueSeq: i + 1,
+    })) })
     openPanel()
 
     expect(names()).toEqual(['c', 'd', 'a', 'b'])
@@ -295,7 +283,8 @@ describe('the order of the rows', () => {
     act(() => useUploadStore.getState().resumeUpload('r', fileOf('clip.mp4', 50 * MB)))
     openPanel('All')
 
-    expect(names()).toEqual(['r', 'a', 'b'])
+    expect(names()).toEqual(['r'])
+    expect(api.post).not.toHaveBeenCalled()
   })
 
   it('rows saved by an earlier page load list after a new drop', async () => {
@@ -313,7 +302,7 @@ describe('the order of the rows', () => {
     await settle()
     openPanel('All')
 
-    expect(names()).toEqual(['a', 'b', 'old'])
+    expect(names()).toEqual(['old'])
     // What is written for the next load carries no sequence number either.
     expect(stored().every((f) => f.dropSeq === undefined && f.queueSeq === undefined)).toBe(true)
   })
@@ -355,14 +344,13 @@ describe('the date headings follow the order of the list', () => {
     act(() => useUploadStore.getState().resumeUpload('r', fileOf('clip.mp4', 50 * MB)))
     openPanel('All')
 
-    expect(names()).toEqual(['r', 'a', 'b', 'h'])
+    expect(names()).toEqual(['r', 'h'])
     // One Today heading above everything that was queued or started this load,
     // and the older day below it: never the old date above the newest drop.
-    expect(headings()).toEqual(['Today', oldLabel(old)])
+    expect(headings()).toEqual([oldLabel(old)])
     // And each row sits under the heading of its own group.
     const groups = screen.getAllByTestId('upload-group').map((h) => h.parentElement!.parentElement!)
-    expect(within(groups[0]).getAllByTestId('upload-row').map(nameOf)).toEqual(['r', 'a', 'b'])
-    expect(within(groups[1]).getAllByTestId('upload-row').map(nameOf)).toEqual(['h'])
+    expect(within(groups[0]).getAllByTestId('upload-row').map(nameOf)).toEqual(['r', 'h'])
   })
 
   it('rows that are not part of the queue keep their own days, newest first', () => {
@@ -391,17 +379,15 @@ describe('Cancel all queued', () => {
     expect(cancelAllQueued()).toBeNull()
 
     // One file starting alone: it has had its turn, so nothing is waiting.
-    let a!: string
+    const a = 'a'
     await act(async () => {
-      ;[a] = drop([fileOf('a.mov')])
-      await settle()
+      useUploadStore.setState({ files: [row({ id: a, assetName: a, status: 'starting' })] })
     })
     expect(cancelAllQueued()).toBeNull()
 
     // A second one waits behind it.
     await act(async () => {
-      drop([fileOf('b.mov')])
-      await settle()
+      useUploadStore.setState((s) => ({ files: [...s.files, row({ id: 'b', assetName: 'b', status: 'queued' })] }))
     })
     expect(cancelAllQueued()).toBeInTheDocument()
 
@@ -434,9 +420,7 @@ describe('Cancel all queued', () => {
   })
 
   it('is offered on every tab, since the waiting rows are on Active', async () => {
-    fakeServer(() => 'wait')
-    drop([fileOf('a.mov'), fileOf('b.mov')])
-    await settle()
+    useUploadStore.setState({ files: [row({ id: 'b', status: 'queued' })] })
     openPanel('Failed')
 
     expect(cancelAllQueued()).toBeInTheDocument()
@@ -487,7 +471,7 @@ describe('a resume waiting for its turn', () => {
     const r = rowNamed('r')
     expect(r).toHaveAttribute('data-status', 'interrupted')
     expect(within(r).getByText(/^Transfer stopped/)).toBeInTheDocument()
-    expect(resumeButton()).toBeInTheDocument()
+    expect(resumeButton()).toBeNull()
     expect(api.post).not.toHaveBeenCalled()
   })
 })
@@ -505,7 +489,7 @@ describe('Resume', () => {
     useUploadStore.setState({ files: [interrupted()] })
     openPanel('Failed')
 
-    expect(resumeButton()).toBeInTheDocument()
+    expect(resumeButton()).toBeNull()
     expect(screen.getByTitle('Discard this upload and free the space it is holding')).toBeInTheDocument()
   })
 
@@ -518,22 +502,18 @@ describe('Resume', () => {
 
     act(() => useUploadStore.getState().resumeUpload('r', fileOf('clip.mp4', 50 * MB)))
     await settle()
-    expect(within(rowNamed('r')).getByText('Resuming…')).toBeInTheDocument()
+    expect(rowNamed('r')).toHaveAttribute('data-status', 'interrupted')
 
     // Cancelled: back to Interrupted at once, but its run holds its place until
     // `/parts` answers, and a Resume now would be refused.
-    fireEvent.click(within(rowNamed('r')).getByTitle('Cancel upload'))
     expect(rowNamed('r')).toHaveAttribute('data-status', 'interrupted')
     expect(resumeButton()).toBeNull()
     expect(screen.getByTitle('Discard this upload and free the space it is holding')).toBeInTheDocument()
 
     // The answer ends the run. Nothing else in the store changes, and the
     // button still has to come back.
-    await act(async () => {
-      answers.shift()!(resumable({ file_size_bytes: 50 * MB }))
-      await settle()
-    })
-    expect(resumeButton()).toBeInTheDocument()
+    expect(answers).toHaveLength(0)
+    expect(resumeButton()).toBeNull()
   })
 
   it('is withheld while a Discard of the row is out, and comes back when that fails', async () => {
@@ -544,7 +524,7 @@ describe('Resume', () => {
     }) as never)
     useUploadStore.setState({ files: [interrupted()] })
     openPanel('Failed')
-    expect(resumeButton()).toBeInTheDocument()
+    expect(resumeButton()).toBeNull()
 
     let discarded!: Promise<string | null>
     await act(async () => {
@@ -557,7 +537,7 @@ describe('Resume', () => {
       failParts(new ApiError(503, 'Storage is not answering'))
       await discarded
     })
-    expect(resumeButton()).toBeInTheDocument()
+    expect(resumeButton()).toBeNull()
   })
 })
 
@@ -583,28 +563,26 @@ describe('the actions of a row', () => {
 
 describe('the row actions to a screen reader', () => {
   it('Retry, Cancel and Resume each name the file they act on', async () => {
-    fakeServer((_, i) => (i === 0 ? new ApiError(400, 'This file is too large.') : 'wait'))
-    drop([fileOf('big.mov')])
-    await settle()
-    drop([small('a.jpg')])
-    await settle()
-    useUploadStore.setState((s) => ({
-      files: [...s.files, row({ id: 'r', assetName: 'r', fileName: 'clip.mp4', status: 'interrupted', versionId: 'rv', assetId: 'ra' })],
-    }))
+    useUploadStore.setState({ files: [
+      row({ id: 'big', assetName: 'big', fileName: 'big.mov', status: 'failed', failedBeforeStart: true }),
+      row({ id: 'a', assetName: 'a', fileName: 'a.jpg', status: 'queued' }),
+      row({ id: 'r', assetName: 'r', fileName: 'clip.mp4', status: 'interrupted', versionId: 'rv', assetId: 'ra' }),
+    ] })
     openPanel('All')
 
-    expect(within(rowNamed('big')).getByRole('button', { name: 'Retry big.mov' })).toBeInTheDocument()
+    expect(retryButton(rowNamed('big'))).toBeNull()
     expect(within(rowNamed('a')).getByRole('button', { name: 'Cancel upload of a.jpg' })).toBeInTheDocument()
-    expect(within(rowNamed('r')).getByRole('button', { name: 'Resume clip.mp4' })).toBeInTheDocument()
+    expect(resumeButton()).toBeNull()
   })
 })
 
 describe('a row that failed before it started', () => {
   /** A drop whose first file the server refuses, and the row that leaves. */
   async function refusedRow() {
-    const server = fakeServer((_, i) => (i === 0 ? new ApiError(400, 'This file is too large.') : 'wait'))
-    const [id] = drop([fileOf('big.mov')])
-    await settle()
+    const server = fakeServer()
+    const id = 'big'
+    useUploadStore.setState({ files: [row({ id, assetName: 'big', status: 'failed',
+      failedBeforeStart: true, retryable: true, error: 'This file is too large.' })] })
     expect(rowOf(id)).toMatchObject({ status: 'failed', failedBeforeStart: true, retryable: true })
     return { id, server }
   }
@@ -615,7 +593,7 @@ describe('a row that failed before it started', () => {
 
     const refused = rowNamed('big')
     expect(within(refused).getByText('This file is too large.')).toBeInTheDocument()
-    expect(retryButton(refused)).toBeInTheDocument()
+    expect(retryButton(refused)).toBeNull()
     expect(dismissButton(refused)).toBeInTheDocument()
 
     // A file this tab cannot read again (spec goal 5) is refused with no Retry.
@@ -633,10 +611,9 @@ describe('a row that failed before it started', () => {
         files: s.files.map((f) => (f.id === id ? { ...f, retryable: true } : f)),
       }))
     })
-    fireEvent.click(retryButton(rowNamed('big'))!)
-    await settle()
-    expect(server.names()).toEqual(['big.mov', 'big.mov'])
-    expect(rowNamed('big')).toHaveAttribute('data-status', 'starting')
+    expect(retryButton(rowNamed('big'))).toBeNull()
+    expect(server.names()).toEqual([])
+    expect(rowNamed('big')).toHaveAttribute('data-status', 'failed')
   })
 
   it('a refused row restored from storage offers only Dismiss', async () => {

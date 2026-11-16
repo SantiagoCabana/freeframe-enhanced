@@ -489,7 +489,7 @@ export function AssetGrid({
           <EmptyState
             icon={Layers}
             title="No assets"
-            description="Upload your first asset to get started."
+            description="Prepare and upload your first video using Electron/Ingest."
             action={onUpload ? { label: 'Upload', onClick: onUpload } : undefined}
           />
         </div>

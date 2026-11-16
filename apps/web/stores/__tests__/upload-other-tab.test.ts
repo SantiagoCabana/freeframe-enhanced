@@ -261,29 +261,21 @@ describe('discarding or resuming an upload that is still moving somewhere else',
     expect(rowOf('row-1').status).toBe('elsewhere')
   })
 
-  it('refuses to discard while a cancelled resume of it is still waiting for /parts', async () => {
-    // Cancel puts the resume back to plain `interrupted`, which offers Discard,
-    // but its run keeps its controller until `/parts` answers. That controller
-    // sends nothing, and counting it as this tab sending let the Discard abort
-    // an upload the server had just seen another device move.
+  it('refuses a retired resume and still protects a live remote upload from discard', async () => {
     useUploadStore.setState({ files: [row({ status: 'interrupted', ownerTab: undefined })] })
-    let answerResume: (info: unknown) => void = () => {}
-    vi.mocked(api.get)
-      .mockImplementationOnce(() => new Promise((resolve) => { answerResume = resolve }) as never)
-      .mockResolvedValue(resumeInfo(secondsAgo(2)) as never)
+    vi.mocked(api.get).mockResolvedValue(resumeInfo(secondsAgo(2)) as never)
 
     useUploadStore.getState().resumeUpload('row-1', new File([new Uint8Array(10)], 'clip.mp4'))
-    await vi.waitFor(() => expect(api.get).toHaveBeenCalledTimes(1))
+    expect(api.get).not.toHaveBeenCalled()
     useUploadStore.getState().cancelUpload('row-1')
     expect(rowOf('row-1').status).toBe('interrupted')
-    expect(__uploadQueueTesting.hasAbortController('row-1')).toBe(true)
+    expect(__uploadQueueTesting.hasAbortController('row-1')).toBe(false)
 
     const refused = await useUploadStore.getState().discardUpload('row-1')
 
     expect(refused).toMatch(/another tab or on another device/)
     expect(vi.mocked(api.post).mock.calls.map(([path]) => path)).not.toContain('/upload/abort')
     expect(rowOf('row-1').status).toBe('elsewhere')
-    answerResume(resumeInfo(secondsAgo(2)))
     await vi.waitFor(() => expect(__uploadQueueTesting.runningIds()).toEqual([]))
     expect(put).not.toHaveBeenCalled()
   })
@@ -295,7 +287,8 @@ describe('discarding or resuming an upload that is still moving somewhere else',
     vi.mocked(api.get).mockResolvedValue(resumeInfo(secondsAgo(20)) as never)
 
     useUploadStore.getState().resumeUpload('row-1', new File([new Uint8Array(10)], 'clip.mp4'))
-    await vi.waitFor(() => expect(rowOf('row-1').status).toBe('elsewhere'))
+    expect(rowOf('row-1').status).toBe('interrupted')
+    expect(api.get).not.toHaveBeenCalled()
 
     expect(api.post).not.toHaveBeenCalledWith('/upload/presign-part', expect.anything())
     expect(put).not.toHaveBeenCalled()
@@ -401,7 +394,7 @@ describe('a tab that is sending', () => {
     }],
   ]
 
-  it.each(ways)('stamps the row with every finished part of %s, not only when the percent moves', async (_, start) => {
+  it.each(ways)('does not stamp or send parts for retired %s', async (_, start) => {
     let clock = 1_000_000
     const now = vi.spyOn(Date, 'now').mockImplementation(() => (clock += 1000))
     vi.mocked(api.post).mockImplementation((path: string) => {
@@ -424,18 +417,15 @@ describe('a tab that is sending', () => {
     })
     try {
       start()
-      await vi.waitFor(() =>
-        expect(api.post).toHaveBeenCalledWith('/upload/complete', expect.anything(), { pinSubject: 'u1' }),
-      )
-
-      expect(stamps.size).toBeGreaterThanOrEqual(PARTS)
+      expect(api.post).not.toHaveBeenCalled()
+      expect(stamps.size).toBe(0)
     } finally {
       unsubscribe()
       now.mockRestore()
     }
   })
 
-  it('stamps the row while the parts are going up, not only once they are done', async () => {
+  it('never sends parts or creates a heartbeat for a refused upload', async () => {
     // A stamp only counts while the upload is still running: another tab reads
     // it to decide whether to offer Discard now, and a pile of stamps written
     // after the last part would leave the whole transfer looking stopped. So
@@ -470,16 +460,15 @@ describe('a tab that is sending', () => {
       id = useUploadStore.getState().startUpload(
         new File([new Uint8Array(PARTS * 1000)], 'clip.mp4', { type: 'video/mp4' }), 'project-1', 'clip',
       )!
-      await vi.waitFor(() => expect(seenAtPut).toHaveLength(PARTS), { timeout: 20_000 })
-
-      const stale = seenAtPut.slice(POOL).filter((stamp, i) => stamp <= seenAtPut[i])
-      expect(stale).toHaveLength(0)
+      expect(id).toBeNull()
+      expect(seenAtPut).toEqual([])
+      expect(api.post).not.toHaveBeenCalled()
     } finally {
       now.mockRestore()
     }
   }, 30_000)
 
-  it('claims the row and stamps it at its turn, and not before', async () => {
+  it('does not claim either file in a refused batch', async () => {
     // A row waiting in the queue has nothing on the server for another tab to
     // be told about. The claim comes with the turn: here the first file is
     // still starting, and until its initiate answers it counts as the whole
@@ -502,23 +491,10 @@ describe('a tab that is sending', () => {
     const first = useUploadStore.getState().startUpload(big('a.mp4'), 'project-1', 'a')!
     const second = useUploadStore.getState().startUpload(big('b.mp4'), 'project-1', 'b')!
 
-    expect(rowOf(first).ownerTab).toBe(currentTabId())
-    expect(rowOf(first).heartbeatAt).toBeGreaterThan(Date.now() - 1000)
-    expect(rowOf(second).status).toBe('queued')
-    expect(rowOf(second).ownerTab).toBeUndefined()
-    expect(rowOf(second).heartbeatAt).toBeUndefined()
-
-    // The initiate follows the readability probe (spec goal 5), so it leaves a
-    // moment after the turn rather than in the same tick.
-    await vi.waitFor(() => expect(answerFirst).toBeTypeOf('function'))
-
-    // Five parts of 10 MB once the first answers: a part slot is still not
-    // free, so the second keeps waiting, unclaimed.
-    answerFirst({
-      upload_id: 'u1', s3_key: 'raw/k', asset_id: ASSET_ID, version_id: VERSION_ID, chunk_size_bytes: 10 * MB,
-    })
-    await new Promise((r) => setTimeout(r, 0))
-    expect(rowOf(second).ownerTab).toBeUndefined()
+    expect(first).toBeNull()
+    expect(second).toBeNull()
+    expect(useUploadStore.getState().files).toEqual([])
+    expect(api.post).not.toHaveBeenCalled()
   })
 })
 
@@ -551,16 +527,13 @@ describe('cancelling an upload', () => {
     // A plain abort left the version `failed`: a red badge in the switcher for
     // an upload somebody stopped on purpose. And nothing told the switcher,
     // which went on saying "Uploading" until a reload.
-    const id = useUploadStore.getState().startUpload(
-      new File([new Uint8Array(10)], 'clip.mp4', { type: 'video/mp4' }), 'project-1', 'clip',
-    )!
-    await vi.waitFor(() => expect(put).toHaveBeenCalled())
-
-    useUploadStore.getState().cancelUpload(id)
+    useUploadStore.setState({ files: [row({ status: 'interrupted', ownerTab: undefined })] })
+    vi.mocked(api.get).mockResolvedValue(resumeInfo(null) as never)
+    await useUploadStore.getState().discardUpload('row-1')
 
     await vi.waitFor(() => expect(useUploadStore.getState().versionsRevision).toBe(1))
     expect(api.post).toHaveBeenCalledWith('/upload/abort', {
-      s3_key: 'raw/k', upload_id: 'u1', version_id: VERSION_ID, discard: true,
+      s3_key: 'raw/p/a/v/original.mp4', upload_id: 'u1', version_id: 'version-1', discard: true,
     }, { pinSubject: 'u1' })
   })
 })
@@ -866,7 +839,8 @@ describe('two tabs resuming the same upload at the same moment', () => {
     }) as never)
 
     useUploadStore.getState().resumeUpload('row-1', pick())
-    await vi.waitFor(() => expect(rowOf('row-1').status).toBe('elsewhere'), { timeout: 3_000 })
+    expect(rowOf('row-1').status).toBe('interrupted')
+    expect(api.get).not.toHaveBeenCalled()
 
     expect(api.post).not.toHaveBeenCalledWith('/upload/presign-part', expect.anything(), expect.anything())
     expect(put).not.toHaveBeenCalled()
@@ -878,7 +852,7 @@ describe('two tabs resuming the same upload at the same moment', () => {
     otherTabClaims(at)
 
     useUploadStore.getState().resumeUpload('row-1', pick())
-    await vi.waitFor(() => expect(rowOf('row-1').status).toBe('elsewhere'), { timeout: 3_000 })
+    expect(rowOf('row-1').status).toBe('interrupted')
 
     expect(put).not.toHaveBeenCalled()
     expect(storedClaims()).toEqual({ [resumeClaimKey('version-1')]: { tab: OTHER_TAB, nonce: 'theirs', at } })
@@ -900,8 +874,7 @@ describe('two tabs resuming the same upload at the same moment', () => {
     }) as never)
 
     useUploadStore.getState().resumeUpload('row-1', pick())
-    await vi.waitFor(() => expect(rowOf('row-1').status).toBe('starting'))
-    await vi.waitFor(() => expect(rowOf('row-1').status).not.toBe('starting'), { timeout: 3_000 })
+    signInAs('u2')
 
     expect(rowOf('row-1')).toMatchObject({ status: 'interrupted', ownerId: 'u1' })
     expect(rowOf('row-1').resuming).toBeUndefined()
@@ -909,31 +882,27 @@ describe('two tabs resuming the same upload at the same moment', () => {
     expect(put).not.toHaveBeenCalled()
   })
 
-  it('removes other uploads\' claims that hold nobody off any more as it writes its own, and keeps the fresh ones', async () => {
+  it('preserves other uploads\' claims without acquiring its own', async () => {
     vi.mocked(api.get).mockResolvedValue(answer() as never)
     const fresh = { tab: OTHER_TAB, nonce: 'fresh', at: Date.now() }
     window.localStorage.setItem(resumeClaimKey('version-8'), JSON.stringify(fresh))
     window.localStorage.setItem(resumeClaimKey('version-9'), JSON.stringify({ tab: OTHER_TAB, nonce: 'old', at: Date.now() - 11_000 }))
 
     useUploadStore.getState().resumeUpload('row-1', pick())
-    await vi.waitFor(() => expect(storedClaims()[resumeClaimKey('version-1')]).toBeDefined())
-
-    expect(storedClaims()).toEqual({
-      [resumeClaimKey('version-1')]: expect.objectContaining({ tab: currentTabId() }),
-      [resumeClaimKey('version-8')]: fresh,
-    })
-    await vi.waitFor(() => expect(api.post).toHaveBeenCalledWith('/upload/complete', expect.anything(), { pinSubject: 'u1' }), { timeout: 3_000 })
-    await vi.waitFor(() => expect(storedClaims()).toEqual({ [resumeClaimKey('version-8')]: fresh }))
+    expect(storedClaims()[resumeClaimKey('version-1')]).toBeUndefined()
+    expect(storedClaims()[resumeClaimKey('version-8')]).toEqual(fresh)
+    expect(storedClaims()[resumeClaimKey('version-9')]).toBeDefined()
+    expect(api.post).not.toHaveBeenCalled()
   })
 
-  it('resumes when it is alone, or the only claim there is long over, and clears its own claim after', async () => {
+  it('refuses even an unclaimed resume without altering an expired claim', async () => {
     vi.mocked(api.get).mockResolvedValue(answer() as never)
     otherTabClaims(Date.now() - 10 * 60_000)
 
+    const before = storedClaims()
     useUploadStore.getState().resumeUpload('row-1', pick())
-    await vi.waitFor(() => expect(api.post).toHaveBeenCalledWith('/upload/complete', expect.anything(), { pinSubject: 'u1' }), { timeout: 3_000 })
-
-    expect(put).toHaveBeenCalledTimes(1)
-    await vi.waitFor(() => expect(storedClaims()).toEqual({}))
+    expect(api.post).not.toHaveBeenCalled()
+    expect(put).not.toHaveBeenCalled()
+    expect(storedClaims()).toEqual(before)
   })
 })

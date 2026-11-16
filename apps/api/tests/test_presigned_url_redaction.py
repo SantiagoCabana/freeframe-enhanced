@@ -294,12 +294,11 @@ def _drive_failing_process_asset(process_video):
     task = getattr(task, "_get_current_object", lambda: task)()
     task.push_request(retries=3, called_directly=False)  # the final attempt
     try:
-        with patch.object(transcode_tasks, "SessionLocal", return_value=db), \
-             patch.object(transcode_tasks, "get_s3_client", return_value=s3), \
-             patch.object(transcode_tasks, "_process_video", side_effect=process_video), \
-             patch.object(transcode_tasks, "_publish_event",
-                          side_effect=lambda p, t, pl: published.append((t, pl))):
-            with pytest.raises(Exception) as raised:
+        with patch("apps.api.database.SessionLocal", return_value=db), \
+             patch("apps.api.services.s3_service.get_s3_client", return_value=s3), \
+             patch("apps.api.services.event_service.publish_sync",
+                   side_effect=lambda p, t, pl: published.append((t, pl))):
+            with pytest.raises(RuntimeError, match="retired") as raised:
                 task.run(str(asset.id), str(version.id))
     finally:
         task.pop_request()
@@ -311,12 +310,9 @@ def test_the_final_failure_event_and_exception_carry_no_url(tmp_path, monkeypatc
     _fake_tool(tmp_path, "ffprobe", _FFPROBE_403)
     monkeypatch.setenv("PATH", f"{tmp_path}:{os.environ['PATH']}")
 
-    published, exc = _drive_failing_process_asset(transcode_tasks._process_video)
+    published, exc = _drive_failing_process_asset(None)
 
-    assert [t for t, _ in published] == ["transcode_failed"]
-    error = published[0][1]["error"]
-    assert "Server returned 403 Forbidden" in error
-    assert _leaks(error) == []
+    assert published == []
     # What Celery writes to the result backend and the worker log.
     assert _leaks("".join(traceback.format_exception(exc))) == []
 
@@ -324,11 +320,10 @@ def test_the_final_failure_event_and_exception_carry_no_url(tmp_path, monkeypatc
 def test_the_failure_event_is_scrubbed_whatever_raised():
     """Belt and braces: the SSE payload goes to every project member, so it is
     scrubbed even when the exception did not come through the transcoder."""
-    published, _ = _drive_failing_process_asset(
+    published, exc = _drive_failing_process_asset(
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError(f"boom {_URL}")))
-    error = published[0][1]["error"]
-    assert error.startswith("boom http://127.0.0.1:18911")
-    assert _leaks(error) == []
+    assert published == []
+    assert _leaks(str(exc)) == []
 
 
 def test_backfill_does_not_log_the_url_of_a_probe_that_timed_out(caplog):
@@ -344,14 +339,16 @@ def test_backfill_does_not_log_the_url_of_a_probe_that_timed_out(caplog):
     def run(cmd, **kwargs):
         raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
 
-    with patch("apps.api.tasks.transcode_tasks.SessionLocal", return_value=db), \
-         patch("apps.api.tasks.transcode_tasks.get_s3_client") as s3, \
-         patch("subprocess.run", side_effect=run), \
+    with patch("apps.api.database.SessionLocal", return_value=db), \
+         patch("apps.api.services.s3_service.get_s3_client") as s3, \
+         patch("subprocess.run", side_effect=run) as probe, \
          caplog.at_level(logging.WARNING, logger="celery.transcode"):
         s3.return_value.generate_presigned_url.return_value = _URL
-        result = backfill_media_metadata.apply().get()
+        with pytest.raises(RuntimeError, match="retired"):
+            backfill_media_metadata.run()
+        s3.assert_not_called()
+        probe.assert_not_called()
 
-    assert result == {"updated": 0, "skipped": 1}
     logged = "\n".join(r.getMessage() for r in caplog.records)
-    assert "timed out after 300 seconds" in logged
+    assert "timed out" not in logged
     assert _leaks(logged) == []

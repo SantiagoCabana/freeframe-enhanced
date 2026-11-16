@@ -90,6 +90,9 @@ fetch() {
   _stub_log "fetch $1 $2"
   [[ -n ${STUB_FETCH_FAIL:-} && $2 == "$STUB_FETCH_FAIL" ]] && return 1
   printf 'services: {}\n' >"$3"
+  if [[ ${STUB_LEGACY_MEDIA_WORKER:-} == 1 && $2 == docker-compose.prod.yml ]]; then
+    printf 'services:\n  worker:\n    image: legacy-api\n' >"$3"
+  fi
 }
 
 ff_sleep() { _stub_log "sleep $1"; }

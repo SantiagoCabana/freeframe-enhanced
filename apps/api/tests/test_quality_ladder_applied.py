@@ -21,6 +21,12 @@ from packages.transcoder.ffmpeg_transcoder import FFmpegTranscoder
 
 # ─────────────────────────────────── the setting reaching the job
 
+def test_fork_default_ladder_matches_deployment():
+    from apps.api.config import Settings
+
+    assert Settings.model_fields["transcoder_qualities"].default == "720p,360p"
+
+
 @contextmanager
 def _capture_job(result: TranscodeResult):
     """Run `_process_video` against a stubbed transcoder and hand back the job.
@@ -44,29 +50,25 @@ def _fixtures():
     return asset, version, media_file, MagicMock()
 
 
-def _job_for(configured: str) -> TranscodeJob:
-    asset, version, media_file, db = _fixtures()
-    result = TranscodeResult(
-        success=True, hls_prefix="processed/x",
-        duration_seconds=6.0, width=1920, height=1080, fps=25.0,
-    )
-    with patch.object(transcode_tasks.settings, "transcoder_qualities", configured), \
-         _capture_job(result) as cls:
-        transcode_tasks._process_video(db, asset, version, media_file, MagicMock(), "processed/x")
-    return cls.return_value.transcode.call_args[0][0]
+def _assert_retired(configured: str):
+    import pytest
+    from apps.api.config import settings
+
+    with patch.object(settings, "transcoder_qualities", configured), \
+         patch("packages.transcoder.ffmpeg_transcoder.FFmpegTranscoder") as encoder:
+        with pytest.raises(RuntimeError, match="retired"):
+            transcode_tasks.process_asset.run("asset-1", "ver-1")
+        encoder.assert_not_called()
 
 
-def test_the_job_carries_the_configured_ladder_and_not_a_literal():
-    # The mutation this exists for: put the old hardcoded list back at the call
-    # site and every test about parsing still passes.
-    assert _job_for("720p").qualities == ["720p"]
-    assert _job_for("1080p,360p").qualities == ["1080p", "360p"]
+def test_legacy_ladder_settings_cannot_reenable_server_jobs():
+    _assert_retired("720p")
+    _assert_retired("1080p,360p")
 
 
-def test_an_unset_or_broken_setting_still_yields_the_full_ladder():
-    # A typo must cost a warning, not every upload on the instance.
-    assert _job_for("").qualities == ["1080p", "720p", "360p"]
-    assert _job_for("108p,72p").qualities == ["1080p", "720p", "360p"]
+def test_unset_or_broken_settings_cannot_reenable_server_jobs():
+    _assert_retired("")
+    _assert_retired("108p,72p")
 
 
 # ─────────────────────────────────── the job reaching the filter graph

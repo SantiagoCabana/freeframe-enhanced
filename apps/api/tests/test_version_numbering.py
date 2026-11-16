@@ -15,6 +15,7 @@ every test here is parameterized over both. Fixing one and not the other is the
 failure this file exists to prevent.
 """
 import uuid
+from fastapi import HTTPException
 
 import pytest
 
@@ -96,15 +97,12 @@ def test_a_soft_deleted_version_does_not_give_its_number_back(
     owner, project = _seed(real_db, monkeypatch)
     asset = _asset_with_versions(real_db, owner, project, [(1, False), (2, True)])
 
-    result = _call(path, real_db, owner, project, asset)
-
-    created = real_db.query(AssetVersion).filter(
-        AssetVersion.id == result.version_id
-    ).first()
-    assert created.version_number == 3, (
-        f"{path} reissued v{created.version_number}; the soft-deleted v2 still "
-        "holds that number under uq_asset_versions_asset_version"
-    )
+    with pytest.raises(HTTPException) as exc:
+        _call(path, real_db, owner, project, asset)
+    assert exc.value.status_code == 410
+    assert [v.version_number for v in real_db.query(AssetVersion).filter(
+        AssetVersion.asset_id == asset.id
+    ).order_by(AssetVersion.version_number)] == [1, 2]
 
 
 @pytest.mark.parametrize("path", ["initiate_upload", "initiate_new_version"])
@@ -117,12 +115,10 @@ def test_numbering_still_follows_the_live_versions_when_none_are_deleted(
     owner, project = _seed(real_db, monkeypatch)
     asset = _asset_with_versions(real_db, owner, project, [(1, False), (2, False)])
 
-    result = _call(path, real_db, owner, project, asset)
-
-    created = real_db.query(AssetVersion).filter(
-        AssetVersion.id == result.version_id
-    ).first()
-    assert created.version_number == 3
+    with pytest.raises(HTTPException) as exc:
+        _call(path, real_db, owner, project, asset)
+    assert exc.value.status_code == 410
+    assert real_db.query(AssetVersion).filter(AssetVersion.asset_id == asset.id).count() == 2
 
 
 @pytest.mark.parametrize("path", ["initiate_upload", "initiate_new_version"])
@@ -135,9 +131,9 @@ def test_every_version_soft_deleted_still_numbers_past_them(
     owner, project = _seed(real_db, monkeypatch)
     asset = _asset_with_versions(real_db, owner, project, [(1, True)])
 
-    result = _call(path, real_db, owner, project, asset)
-
-    created = real_db.query(AssetVersion).filter(
-        AssetVersion.id == result.version_id
-    ).first()
-    assert created.version_number == 2
+    with pytest.raises(HTTPException) as exc:
+        _call(path, real_db, owner, project, asset)
+    assert exc.value.status_code == 410
+    version = real_db.query(AssetVersion).filter(AssetVersion.asset_id == asset.id).one()
+    assert version.version_number == 1
+    assert version.deleted_at is not None

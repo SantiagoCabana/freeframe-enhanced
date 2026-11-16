@@ -145,7 +145,7 @@ def test_cjk_asset_name_export_does_not_crash(_, client, mock_db, auth_headers):
     assert disposition.isascii()
 
 
-def test_edl_export_uses_source_embedded_start_timecode(client, mock_db, auth_headers):
+def test_edl_export_uses_default_without_reading_original(client, mock_db, auth_headers):
     asset, version = _asset(), _version()
     media = _media()
     media.s3_key_raw = "original/demo.mov"
@@ -179,14 +179,12 @@ def test_edl_export_uses_source_embedded_start_timecode(client, mock_db, auth_he
         )
 
     assert response.status_code == 200
-    assert "00:59:57:13" in response.text
-    presign.assert_called_once_with("original/demo.mov", expires_in=300)
-    command = ffprobe.call_args.args[0]
-    assert command[0] == "ffprobe"
-    assert command[-1] == "https://storage.example/original.mov"
+    assert "01:00:02:13" in response.text
+    presign.assert_not_called()
+    ffprobe.assert_not_called()
 
 
-def test_probe_uses_format_tag_after_invalid_video_tag():
+def test_retired_probe_does_not_extract_format_tags():
     from apps.api.routers.comments import _probe_source_timecode
 
     media = MagicMock(id=uuid.uuid4(), s3_key_raw="original/demo.mov")
@@ -211,17 +209,17 @@ def test_probe_uses_format_tag_after_invalid_video_tag():
     ):
         timecode = _probe_source_timecode(media, MagicMock(timebase=25))
 
-    assert timecode == "00:40:00:00"
+    assert timecode is None
 
 
 @pytest.mark.parametrize(
     ("source_tc", "expected_mode", "expected_record"),
     [
-        ("00:59:55:00", "NON-DROP FRAME", "00:59:57:16"),
-        ("00:59:55;00", "DROP FRAME", "00:59:57;16"),
+        ("00:59:55:00", "DROP FRAME", "01:00:02;16"),
+        ("00:59:55;00", "DROP FRAME", "01:00:02;16"),
     ],
 )
-def test_edl_export_preserves_source_drop_frame_mode(
+def test_edl_export_does_not_probe_source_drop_frame_mode(
     client, mock_db, auth_headers, source_tc, expected_mode, expected_record
 ):
     asset, version = _asset(), _version()
@@ -393,10 +391,10 @@ def test_edl_export_keeps_default_drop_frame_mode_for_fallback_and_explicit_tc(
     assert response.status_code == 200
     assert "FCM: DROP FRAME" in response.text
     assert "01:00:02;16" in response.text
-    assert (ffprobe.call_count == 0) is (start_mode == "explicit")
+    ffprobe.assert_not_called()
 
 
-def test_edl_export_commits_before_probing_source_timecode(
+def test_edl_export_releases_transaction_without_external_media_access(
     client, mock_db, auth_headers
 ):
     asset, version = _asset(), _version()
@@ -437,7 +435,7 @@ def test_edl_export_commits_before_probing_source_timecode(
         )
 
     assert response.status_code == 200
-    assert events == ["commit", "presign", "ffprobe"]
+    assert events == ["commit"]
 
 
 @pytest.mark.parametrize("failure", ["timeout", "missing_ffprobe", "nonzero_exit"])

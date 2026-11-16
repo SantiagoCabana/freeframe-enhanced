@@ -252,7 +252,7 @@ For the full guide including **SSL setup**, **bring-your-own infrastructure** (e
 | Backend      | FastAPI, SQLAlchemy, Pydantic                    |
 | Database     | PostgreSQL 15                                     |
 | Queue        | Celery + Redis                                    |
-| Transcoding  | FFmpeg (multi-bitrate HLS)                        |
+| Media preparation | Electron prepares HLS locally; Ingest uploads it to object storage |
 | Storage      | Any S3-compatible (AWS, R2, B2, Garage, Silo)    |
 | Proxy        | Traefik (opt-in Let's Encrypt SSL)                |
 | Auth         | JWT + magic code email login                      |

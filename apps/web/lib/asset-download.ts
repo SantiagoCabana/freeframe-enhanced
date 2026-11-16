@@ -22,7 +22,9 @@ export async function downloadAsset(
   // do not cancel each other, and the page is never left.
   const iframe = document.createElement('iframe')
   iframe.style.display = 'none'
-  iframe.src = data.url
+  iframe.src = data.url.startsWith('/stream/')
+    ? `${process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'}${data.url}`
+    : data.url
   document.body.appendChild(iframe)
-  setTimeout(() => iframe.remove(), 30000)
+  // Keep the frame until navigation: removing it can cancel a large HLS archive.
 }

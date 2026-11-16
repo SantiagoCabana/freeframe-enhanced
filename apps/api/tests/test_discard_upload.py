@@ -162,9 +162,8 @@ def test_a_discarded_upload_is_never_published(db, storage, monkeypatch):
     """
     owner, _, _, (version,) = _seed(db)
     dispatched = []
-    monkeypatch.setattr(upload_module, "head_object_size", lambda k: 23 * MB)
-    monkeypatch.setattr(upload_module, "_trigger_processing",
-                        lambda a, v: dispatched.append(v))
+    monkeypatch.setattr("apps.api.tasks.celery_app.send_task_safe",
+                        lambda *a, **k: dispatched.append(a))
 
     _abort(db, owner, version)
 
@@ -186,38 +185,31 @@ def test_the_flag_cannot_delete_a_version_that_already_landed(db, storage):
     assert storage["deleted"] == []
 
 
-def test_a_completion_that_lands_during_the_abort_is_not_thrown_away(db, storage, monkeypatch):
-    """The status is re-read after the storage round trip, not trusted from before it.
-
-    `/upload/complete` can commit `processing` while this request is waiting on
-    storage to abort. The version object in hand still says `uploading`, and a
-    discard deciding on that deletes the master of a version whose transcode has
-    just been dispatched. The update below goes straight to the connection,
-    past the session, which is what another transaction's commit looks like
-    from inside this one.
-    """
+def test_discard_locks_the_version_before_contacting_storage(db, storage, monkeypatch):
+    """The row lock serializes a legacy completer before any storage deletion."""
     owner, _, asset, (version,) = _seed(db)
 
-    def complete_lands_meanwhile(key, upload_id):
+    from sqlalchemy import event
+    statements = []
+    connection = db.connection()
+    def record(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+    event.listen(connection, "before_cursor_execute", record)
+    def assert_locked(key, upload_id):
         storage["aborted"].append((key, upload_id))
-        db.connection().execute(
-            text("UPDATE asset_versions SET processing_status = 'processing' WHERE id = :id"),
-            {"id": version.id},
-        )
-    monkeypatch.setattr(upload_module, "abort_multipart_upload", complete_lands_meanwhile)
+        assert any("asset_versions" in sql and "FOR UPDATE" in sql for sql in statements)
+    monkeypatch.setattr(upload_module, "abort_multipart_upload", assert_locked)
 
-    _abort(db, owner, version)
+    try:
+        _abort(db, owner, version)
+    finally:
+        event.remove(connection, "before_cursor_execute", record)
 
-    # Status is not asserted after the rollback: the simulated commit shares
-    # this connection, so the rollback takes it back too.
-    assert _committed(db, AssetVersion, version.id).deleted_at is None
-    assert _key(version) not in storage["deleted"]
-    assert _committed(db, Asset, asset.id).deleted_at is None
+    assert _committed(db, AssetVersion, version.id).deleted_at is not None
 
 
 def test_without_the_flag_a_transfer_that_gave_up_is_still_failed(db, storage, monkeypatch):
     owner, _, _, (version,) = _seed(db)
-    monkeypatch.setattr(upload_module, "head_object_size", lambda k: 0)
 
     _abort(db, owner, version, discard=False)
 

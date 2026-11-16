@@ -91,14 +91,8 @@ def _initiate(client, auth_headers, mock_db, monkeypatch, path, file_size, part_
     Returns (response, recorded rows, multipart uploads created).
     """
     created = []
-    for mod in (upload_module, assets_module):
-        monkeypatch.setattr(mod, "upload_guard_error", lambda db, n: None)
-        monkeypatch.setattr(mod, "choose_part_size", lambda db, n: part_choice)
-        monkeypatch.setattr(mod, "require_project_role", lambda *a, **k: None)
-        monkeypatch.setattr(mod, "create_multipart_upload",
-                            lambda k, m: created.append(k) or "upload-1")
-    monkeypatch.setattr(assets_module, "next_version_number", lambda db, a: 1)
-    monkeypatch.setattr(upload_module, "next_version_number", lambda db, a: 1)
+    monkeypatch.setattr("apps.api.services.s3_service.create_multipart_upload",
+                        lambda k, m: created.append(k) or "upload-1")
 
     recorded = []
 
@@ -132,10 +126,9 @@ def test_initiate_pins_and_returns_the_chosen_part_size(
     resp, recorded, _ = _initiate(client, auth_headers, mock_db, monkeypatch, path,
                                   20 * GB, (39 * MiB, None))
 
-    assert resp.status_code == 200, resp.text
-    assert resp.json()["chunk_size_bytes"] == 39 * MiB
-    versions = [o for o in recorded if hasattr(o, "version_number")]
-    assert versions and versions[0].chunk_size_bytes == 39 * MiB
+    assert resp.status_code == 410, resp.text
+    assert recorded == []
+    mock_db.commit.assert_not_called()
 
 
 @pytest.mark.parametrize("path", ["new_asset", "new_version"])
@@ -147,8 +140,7 @@ def test_initiate_refuses_a_file_the_fixed_size_cannot_hold_before_creating_anyt
         200 * GB, (10 * MiB, "File is larger than the 97.7 GB this instance's ..."),
     )
 
-    assert resp.status_code == 400
-    assert "97.7 GB" in resp.json()["detail"]
+    assert resp.status_code == 410
     assert created == []
     assert not [o for o in recorded if hasattr(o, "version_number")]
 
@@ -158,7 +150,7 @@ def test_a_file_over_the_old_97_gb_ceiling_is_accepted_by_the_schema(
 ):
     resp, _, _ = _initiate(client, auth_headers, mock_db, monkeypatch, "new_asset",
                            150 * GB, (part_size_for(150 * GB, 0), None))
-    assert resp.status_code == 200, resp.text
+    assert resp.status_code == 410, resp.text  # Valid schema, retired operation.
 
 
 # ── the setting ───────────────────────────────────────────────────────────────
@@ -181,9 +173,8 @@ def test_put_accepts_automatic_or_a_size_in_range(
     r = client.put("/instance/settings", headers=auth_headers,
                    json={"upload_part_size_bytes": value})
 
-    assert r.status_code == 200, r.text
-    assert row.upload_part_size_bytes == value
-    assert r.json()["upload_part_size_bytes"] == value
+    assert r.status_code == 410, r.text
+    mock_db.commit.assert_not_called()
 
 
 @pytest.mark.parametrize("value", [1, 4 * MiB, 512 * MiB + 1, -1])
@@ -242,43 +233,31 @@ def _complete(client, auth_headers, mock_db, test_user, monkeypatch, clock):
     media_file.file_size_bytes = 23 * MiB
     mock_db.first.side_effect = [version, media_file]
 
-    listing = [{"PartNumber": 1, "ETag": '"a"', "Size": 10 * MiB},
-               {"PartNumber": 2, "ETag": '"b"', "Size": 10 * MiB},
-               {"PartNumber": 3, "ETag": '"c"', "Size": 3 * MiB}]
-    monkeypatch.setattr(upload_module, "list_upload_parts", lambda k, u: listing)
-    monkeypatch.setattr(upload_module, "complete_multipart_upload", lambda k, u, p: None)
-    monkeypatch.setattr(upload_module, "head_object_size", lambda k: None)
-    monkeypatch.setattr(upload_module, "_trigger_processing", lambda a, v: None)
-    ticks = iter(clock)
-    monkeypatch.setattr(upload_module, "time", types.SimpleNamespace(monotonic=lambda: next(ticks)))
-
     return client.post("/upload/complete", headers=auth_headers, json={
         "s3_key": media_file.s3_key_raw, "upload_id": "upload-1",
         "asset_id": str(version.asset_id), "version_id": str(version.id), "parts": [],
     }), version
 
 
-def test_a_slow_completion_logs_where_the_time_went(
+def test_retired_completion_never_assembles_or_changes_status(
     client, auth_headers, mock_db, test_user, monkeypatch, caplog
 ):
-    # started, listed, assembled, finished
-    with caplog.at_level(logging.WARNING, logger=upload_module.logger.name):
+    with caplog.at_level(logging.WARNING):
         resp, version = _complete(client, auth_headers, mock_db, test_user, monkeypatch,
                                   [100.0, 101.5, 130.0, 130.5])
 
-    assert resp.status_code == 200, resp.text
-    line = next(r.getMessage() for r in caplog.records if "took" in r.getMessage())
-    assert str(version.id) in line
-    assert "took 30.5s (3 parts of 10 MB, 23 MB total)" in line
-    assert "listing 1.5s, assembling 28.5s, finishing 0.5s" in line
+    assert resp.status_code == 410, resp.text
+    assert version.processing_status == ProcessingStatus.uploading
+    mock_db.query.assert_not_called()
+    mock_db.commit.assert_not_called()
 
 
-def test_a_quick_completion_logs_nothing(
+def test_retired_completion_does_not_claim_success_in_logs(
     client, auth_headers, mock_db, test_user, monkeypatch, caplog
 ):
-    with caplog.at_level(logging.WARNING, logger=upload_module.logger.name):
+    with caplog.at_level(logging.WARNING):
         resp, _ = _complete(client, auth_headers, mock_db, test_user, monkeypatch,
                             [100.0, 100.2, 101.0, 101.1])
 
-    assert resp.status_code == 200, resp.text
+    assert resp.status_code == 410, resp.text
     assert not [r for r in caplog.records if "took" in r.getMessage()]

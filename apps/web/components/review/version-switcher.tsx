@@ -17,9 +17,9 @@ export const versionStatusConfig: Record<
     icon: <Loader2 className="h-2.5 w-2.5 animate-spin" />,
   },
   processing: {
-    label: 'Processing',
+    label: 'Server processing retired',
     className: 'text-status-warning',
-    icon: <Loader2 className="h-2.5 w-2.5 animate-spin" />,
+    icon: <AlertCircle className="h-2.5 w-2.5" />,
   },
   ready: {
     label: 'Ready',

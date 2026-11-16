@@ -154,22 +154,16 @@ describe('saved rows of other accounts', () => {
     expect(storedIds()).toEqual([])
   })
 
-  it('X → Y → X while X\'s row is mid-transfer: the row is not offered Resume', async () => {
+  it('X → Y → X preserves a historical upload without restarting its transfer', async () => {
     signInAs(X)
-    const server = fakeServer(() => 'answer', 'hang')
-    const [x1] = drop([fileOf('x1.mov')])
-    await settle()
-    expect(rowOf(x1).status).toBe('uploading')
-    expect(server.inFlight.length).toBeGreaterThan(0)
+    const x1 = 'x1'
+    useUploadStore.setState({ files: [row({ id: x1, ownerId: X, status: 'interrupted', versionId: 'x1-v', uploadId: 'x1-u', progress: 40 })] })
+    vi.mocked(api.post).mockClear()
 
     signInAs(Y)
     thisTabWrites()
-    // Bytes still move for X while Y is signed in, and this tab is the one
-    // sending them: what it writes is the live row, not the copy from before.
-    server.finishOne()
-    await settle()
-    expect(rowOf(x1).progress).toBeGreaterThan(0)
-    expect(storedRow(x1)).toMatchObject({ status: 'uploading', ownerId: X, ownerTab: currentTabId(), progress: rowOf(x1).progress })
+    expect(visibleFiles(useUploadStore.getState())).toEqual([])
+    expect(storedRow(x1)).toMatchObject({ status: 'interrupted', ownerId: X, progress: 40 })
 
     // Meanwhile another tab saved an interrupted upload of X's that this tab never had.
     const xo = row({ id: 'xo', ownerId: X, status: 'interrupted', versionId: 'xo-v', ownerTab: OTHER_TAB, heartbeatAt: Date.now() - LIVE_WINDOW_MS * 2 })
@@ -177,12 +171,12 @@ describe('saved rows of other accounts', () => {
 
     signInAs(X)
 
-    // The row this tab is sending is still uploading here, with its run, and
-    // nothing offers Resume on it.
-    expect(rowOf(x1).status).toBe('uploading')
-    expect(testing.runningIds()).toEqual([x1])
-    expect(testing.hasAbortController(x1)).toBe(true)
-    expect(storedRow(x1)).toMatchObject({ status: 'uploading', ownerId: X })
+    useUploadStore.getState().resumeUpload(x1, fileOf('x1.mov'))
+    expect(rowOf(x1).status).toBe('interrupted')
+    expect(testing.runningIds()).toEqual([])
+    expect(testing.hasAbortController(x1)).toBe(false)
+    expect(api.post).not.toHaveBeenCalled()
+    expect(storedRow(x1)).toMatchObject({ status: 'interrupted', ownerId: X })
     // The row X saved elsewhere comes back with X, judged as stored rows are.
     expect(rowOf('xo')).toMatchObject({ status: 'interrupted', ownerId: X })
     expect(visibleFiles(useUploadStore.getState()).map((f) => f.id).sort()).toEqual([x1, 'xo'].sort())
@@ -247,7 +241,7 @@ describe('saved rows of this account that this tab never held', () => {
     expect(storedIds()).toEqual([])
   })
 
-  it('the storage event for an account a start already noticed changes nothing', async () => {
+  it('a refused start never adopts another account’s saved rows before sign-in is observed', async () => {
     signInAs(X)
     fakeServer(() => 'wait')
     // Y signs in elsewhere; Y's drop here notices it before the event arrives.
@@ -256,12 +250,10 @@ describe('saved rows of this account that this tab never held', () => {
     // Another tab saves a row of Y's in between.
     const late = row({ id: 'late', ownerId: Y, status: 'interrupted', versionId: 'late-v', ownerTab: OTHER_TAB })
     anotherTabWrites([...stored(), late])
-    const before = files()
-
     signInAs(Y)
 
-    expect(files()).toEqual(before)
-    expect(files().filter((f) => f.id === 'late')).toEqual([])
+    expect(visibleFiles(useUploadStore.getState()).every((f) => f.ownerId === Y)).toBe(true)
+    expect(testing.runningIds()).toEqual([])
     expect(storedRow('late')).toEqual(asStored(late))
   })
 })

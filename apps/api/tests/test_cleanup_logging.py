@@ -83,7 +83,7 @@ def test_requeue_disabled_is_a_warning(monkeypatch, caplog):
     monkeypatch.setattr(settings, "stuck_processing_timeout_hours", 0)
     assert ct.requeue_stuck_processing() == 0
 
-    [rec] = _records(caplog, "requeue: disabled")
+    [rec] = _records(caplog, "Ignoring retired requeue_stuck_processing")
     assert rec.levelno == logging.WARNING
 
 

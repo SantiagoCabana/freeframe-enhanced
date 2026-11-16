@@ -4,7 +4,11 @@ SQLAlchemy 2.1 changed the default driver for a bare ``postgresql://`` URL
 from psycopg2 to psycopg (v3). We ship only psycopg2-binary, so the URL must
 name psycopg2 explicitly; otherwise the engine fails to import its driver.
 """
-from apps.api.database import pin_psycopg2_driver
+from apps.api.database import engine, pin_psycopg2_driver
+
+
+def test_database_pool_checks_connections_before_reuse():
+    assert engine.pool._pre_ping is True
 
 
 def test_bare_postgresql_url_gets_psycopg2():

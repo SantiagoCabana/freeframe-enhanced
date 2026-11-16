@@ -60,7 +60,7 @@ def test_reap_logic_soft_deletes_and_deletes_s3(mock_db, monkeypatch):
     media = MagicMock(s3_key_raw="raw/x", s3_key_processed="processed/x",
                       s3_key_download="processed/x/download.mp4", s3_key_thumbnail="thumb/x")
     # versions query returns [version]; media-files query (inside the loop) returns [media]
-    mock_db.all.side_effect = [[version], [media]]
+    mock_db.all.side_effect = [[version], [media], [media]]
 
     n = ct._reap_stale_uploads(mock_db)
 
@@ -84,6 +84,20 @@ def _seed_version(db, status, created_shift_hours):
                      mime_type="video/mp4", file_size_bytes=1, s3_key_raw=f"raw/{v.id}"))
     db.flush()
     return v
+
+
+def test_reaper_leaves_ingest_uploads_to_ingest(real_db, monkeypatch):
+    uploading = _seed_version(real_db, ProcessingStatus.uploading, 48)
+    failed = _seed_version(real_db, ProcessingStatus.failed, 48)
+    for version in (uploading, failed):
+        media = real_db.query(MediaFile).filter_by(version_id=version.id).one()
+        media.s3_key_raw = f"processed/project/asset/{version.id}/master.m3u8"
+    real_db.flush()
+
+    n, calls = _reap_with_storage(real_db, monkeypatch, lambda key: None)
+    assert n == 0
+    assert uploading.deleted_at is None and failed.deleted_at is None
+    assert calls["deleted"] == [] and calls["head"] == []
 
 
 def test_reap_selects_only_old_uploading_and_failed(real_db, monkeypatch):

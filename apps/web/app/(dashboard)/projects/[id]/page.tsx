@@ -327,7 +327,7 @@ export default function ProjectDetailPage() {
       : membersError !== undefined || (userFetched && !user)
         ? "allow"
         : "wait";
-  const mayDropFiles = dropRole !== "refuse";
+  const mayDropFiles = false; // Media preparation and uploads belong to Electron/Ingest.
   // delete_comment lets a project owner remove anyone's comment.
   const canModerate = currentRole === "owner";
 

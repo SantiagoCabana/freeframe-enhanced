@@ -1786,7 +1786,7 @@ export interface UploadStore {
 function mapProcessingStatus(status: string): UploadStatus {
   switch (status) {
     case 'uploading': return 'interrupted'
-    case 'processing': return 'processing'
+    case 'processing': return 'failed'
     case 'ready': return 'complete'
     case 'failed': return 'failed'
     default: return 'complete'
@@ -1961,6 +1961,7 @@ function mergeHistoryAssets(existing: UploadFile[], assets: AssetResponse[]): Up
         progress: status === 'interrupted' || status === 'elsewhere' ? 0 : 100,
         processingProgress: v.processing_status === 'ready' ? 100 : 0,
         status,
+        error: v.processing_status === 'processing' ? 'Server processing retired. Prepare and upload a new version with Electron/Ingest.' : undefined,
         assetId: a.id,
         versionId: v.id,
         createdAt: new Date(v.created_at).getTime(),
@@ -2310,69 +2311,21 @@ function queueEntry(row: UploadFile, kind: 'new' | 'resume'): QueueEntry {
   }
 }
 
-let pumping = false
-let pumpAgain = false
-
-/**
- * Starts every waiting row the start rule allows now. Called on every change
- * that can allow one (spec goal 2): a row added, a part finished, a run ended,
- * an initiate or `/parts` answer, a hold ended.
- *
- * Re-entrant calls are folded into the running one, so a run that ends inside
- * a start cannot start the same row twice.
- */
+/** Persisted legacy queues must never restart uploads after upgrading. */
 function pump(): void {
-  if (pumping) {
-    pumpAgain = true
-    return
-  }
-  pumping = true
-  try {
-    do {
-      pumpAgain = false
-      for (;;) {
-        const ids = queue.nextToStart(activeInfos(), partBudget.size)
-        if (ids.length === 0) break
-        let skipped = false
-        for (const id of ids) {
-          // Read for each start: a row is started only as the account that added it.
-          const now = noticeSubject()
-          const row = rowById(id)
-          const kind = turnKind(row)
-          if (!row || !kind) {
-            // Gone, cancelled or already changed by something else: it gives up its place.
-            queue.remove(id)
-            skipped = true
-            continue
-          }
-          if (row.ownerId === undefined || row.ownerId !== now) {
-            refuseTurn(row, kind, now)
-            skipped = true
-            continue
-          }
-          startRun(row, kind)
-        }
-        // A row that gave up its place may have left room for the next one.
-        if (!skipped) break
-      }
-    } while (pumpAgain)
-  } finally {
-    pumping = false
-  }
+  return
 }
 
-/** A row's turn: it leaves the waiting list, becomes active, and its run begins. */
+/** Old retry timers must not revive uploads after an upgrade. */
 function startRun(row: UploadFile, kind: 'new' | 'resume'): void {
-  const rank = queue.markStarted(row.id)
-  const runKey = partRunKey(row.id)
-  const runner: Runner = { sizeBytes: fileRefs.get(row.id)?.size ?? row.fileSize, unfinished: 'unknown' }
-  runners.set(row.id, runner)
-  // On the key `uploadAllParts` will use, so this run's parts are served in turn order.
-  partBudget.setRank(runKey, rank)
-  // A run settles its own failures and always ends through `endRun`; anything
-  // still thrown is a bug, and is reported rather than left unhandled.
-  const run = kind === 'new' ? runNew(row.id, runner, runKey) : runResume(row.id, runner, runKey)
-  run.catch((err: unknown) => console.error('Upload run ended with an error', err))
+  endHoldIfProbe(row.id)
+  queue.remove(row.id)
+  patchRow(row.id, {
+    status: kind === 'resume' ? 'interrupted' : 'failed',
+    queuedResume: undefined,
+    retryable: false,
+    error: 'Web media uploads have been retired. Use Electron/Ingest.',
+  })
 }
 
 /** What every run does as it ends, however it ends. */
@@ -2641,618 +2594,6 @@ function failUnreadableBeforeStart(id: string, err: unknown): void {
   })
 }
 
-/**
- * A new upload's turn: initiate (or create the version), then send every part
- * and complete. Everything that announces a transfer starts here, at the turn,
- * and not when the row was added.
- */
-async function runNew(id: string, runner: Runner, runKey: string): Promise<void> {
-  const file = fileRefs.get(id)!
-  const target: StartTarget = startTargets.get(id) ?? { kind: 'asset', folderId: null }
-  // Every request below is sent as this account, or not at all.
-  const owner = rowById(id)?.ownerId
-  const asOwner = { pinSubject: owner }
-
-  const controller = new AbortController()
-  abortControllers[id] = controller
-
-  // Track initiate response fields so catch block can call /upload/abort,
-  // and ask the server what became of the version before it does.
-  let upload_id: string | undefined
-  let s3_key: string | undefined
-  let version_id: string | undefined
-  let asset_id: string | undefined
-  let completionAttempted = false
-
-  // Everything the run takes is taken inside the `try`, so the `finally` gives
-  // it all back and ends the run whatever throws. Even the first heartbeat is a
-  // write to shared storage, which can throw (a full quota), and a run that
-  // threw before its `try` kept its place and, for a large file, the whole
-  // part budget for the life of the tab.
-  let stopBeat = () => {}
-  let watch: ReturnType<typeof transferWatch> | null = null
-  try {
-    stopBeat = beatFor((patch) => patchRow(id, patch))
-    const runWatch = transferWatch(id, file.size, (patch) => patchRow(id, patch))
-    watch = runWatch
-    patchRow(id, { status: 'starting', holdReason: undefined, error: undefined, progress: 0 })
-
-    // What the asset will be called: the row's name now, at the turn, so a
-    // rename made while it waited is the name it is created with.
-    const startRow = rowById(id)
-    const sentName = startRow?.assetName ?? file.name
-    const projectId = startRow?.projectId ?? ''
-
-    // Before the server hears of the file, so a file that changed or moved
-    // while it waited creates nothing (goal 4) and the queue moves on.
-    try {
-      await assertReadable(file)
-    } catch (err) {
-      failUnreadableBeforeStart(id, err)
-      return
-    }
-    // Cancelled while it was read: nothing has been sent, and nothing will be.
-    if (controller.signal.aborted) {
-      handOffProbe(id)
-      throw new DOMException('Upload cancelled', 'AbortError')
-    }
-    // The account may have changed while the file was read.
-    const now = noticeSubject()
-    if (now !== owner) {
-      handOffProbe(id)
-      patchRow(id, accountFailure(now))
-      return
-    }
-
-    let initRes: InitiateResponse
-    try {
-      initRes = target.kind === 'asset'
-        ? await api.post<InitiateResponse>('/upload/initiate', {
-          project_id: projectId,
-          asset_name: sentName,
-          original_filename: file.name,
-          file_size_bytes: file.size,
-          // The type the drop planned: a file read out of a dropped folder
-          // has no browser type at all.
-          mime_type: startRow?.fileType || file.type,
-          folder_id: target.folderId,
-        }, asOwner)
-        : await api.post<VersionInitiateResponse>(`/assets/${target.assetId}/versions`, {
-          project_id: projectId,
-          asset_name: sentName,
-          original_filename: file.name,
-          file_size_bytes: file.size,
-          mime_type: file.type,
-        }, asOwner)
-    } catch (err) {
-      onInitiateFailed(id, err)
-      return
-    }
-    endHoldIfProbe(id)
-
-    upload_id = initRes.upload_id
-    s3_key = initRes.s3_key
-    version_id = initRes.version_id
-    asset_id = target.kind === 'asset' ? initRes.asset_id : target.assetId
-
-    // Now the server has said how the file is cut, and the start rule can
-    // count this file by its parts instead of by the whole budget.
-    runner.unfinished = Math.ceil(file.size / initRes.chunk_size_bytes)
-    const cancelled = controller.signal.aborted
-    // The answer came after another account signed in, or after the sign-out.
-    // What it created is the owner's: kept on the row, `interrupted`, to be
-    // resumed or discarded once they are signed in again. Nothing more is sent.
-    const ownerGone = noticeSubject() !== owner
-    patchRow(id, {
-      uploadId: upload_id, s3Key: s3_key, assetId: asset_id, versionId: version_id,
-      // A cancel made while the initiate was out stands.
-      ...(cancelled ? {} : { status: ownerGone ? 'interrupted' as const : 'uploading' as const }),
-    })
-    // A new version exists on the server from this answer, and a screen
-    // showing the asset's versions is told now rather than guessing at when.
-    if (target.kind === 'version') {
-      useUploadStore.setState((s) => ({ versionsRevision: s.versionsRevision + 1 }))
-    }
-    pump()
-    // Cancelled while the initiate was out: what it created is thrown away below.
-    if (cancelled) throw new DOMException('Upload cancelled', 'AbortError')
-    if (ownerGone) return
-
-    if (target.kind === 'asset') {
-      // The round trip is the window that does exist, and the only place a
-      // rename can be lost: the panel offers the pencil from the moment the
-      // row appears, so an edit during it went into the row while the request
-      // carrying the old name had already left. Now that the asset exists it
-      // can be told. Failing here must not fail the upload -- the bytes are
-      // the point.
-      //
-      // It must not be swallowed either. The row is put back to the name the
-      // asset actually has and the reason is recorded on it, the way the
-      // interactive rename path does. Keeping the refused name would leave
-      // the row disagreeing with the asset, the grid, search and the share
-      // link for the rest of the session -- and would also block the retry,
-      // since `renameUpload` returns early when the typed name equals the
-      // one already in the row.
-      const nameAfterInitiate = rowById(id)?.assetName ?? sentName
-      if (nameAfterInitiate !== sentName) {
-        try {
-          await api.patch(`/assets/${asset_id}`, { name: nameAfterInitiate }, asOwner)
-        } catch (err) {
-          patchRow(id, {
-            assetName: sentName,
-            renameError: err instanceof Error ? err.message : 'Rename failed',
-          })
-        }
-      }
-    }
-
-    const parts = await uploadAllParts(
-      file, s3_key, upload_id, controller,
-      (percent) => patchRow(id, { progress: percent, heartbeatAt: Date.now() }),
-      {
-        budget: partBudget,
-        fileKey: runKey,
-        chunkSize: initRes.chunk_size_bytes,
-        ownerId: owner,
-        onPartDone: () => patchRow(id, { heartbeatAt: Date.now() }),
-        onUnfinished: (n) => {
-          runner.unfinished = n
-          pump()
-        },
-        onBytes: runWatch.onBytes,
-        onAllSent: runWatch.onAllSent,
-        onResend: runWatch.onResend,
-      },
-    )
-
-    completionAttempted = true
-    patchRow(id, { finalizing: true })
-    await postCompletion({
-      s3_key,
-      upload_id,
-      asset_id,
-      version_id,
-      parts,
-    }, asOwner, controller.signal)
-
-    // Upload done — backend now processes (transcode/convert).
-    // For non-processable types (or if SSE isn't wired), mark complete directly.
-    const isMedia = file.type.startsWith('video/') || file.type.startsWith('audio/') || file.type.startsWith('image/')
-    patchRow(id, isMedia
-      ? { progress: 100, status: 'processing', processingProgress: 0 }
-      : { progress: 100, status: 'complete' })
-  } catch (err) {
-    // Asking the server what happened takes a round-trip, and the row stays
-    // interactive for its duration -- the panel still offers Cancel on an
-    // `uploading` row. A cancel landing in that window is the user's decision
-    // and outranks whatever we were about to write.
-    const userCancelled = () => rowById(id)?.status === 'cancelled'
-    const applyLanded = (landed: 'processing' | 'complete') => {
-      if (userCancelled()) return
-      patchRow(id, {
-        progress: 100,
-        status: landed,
-        processingProgress: landed === 'complete' ? 100 : 0,
-      })
-    }
-
-    if (isAbortError(err)) {
-      patchRow(id, { status: 'cancelled', progress: 0 })
-    } else {
-      // A completion that threw may still have landed, with only its
-      // response lost on the way back. Writing that off would report a
-      // working upload as Failed.
-      const landed = completionAttempted && asset_id && version_id
-        ? await completedVersionStatus(asset_id, version_id, owner)
-        : null
-      if (landed) {
-        applyLanded(landed)
-      } else if (!userCancelled()) {
-        // Nothing was destroyed, so nothing is lost: the multipart upload is
-        // still open and every part already sent is still held. `interrupted`
-        // says that, where `failed` claimed the opposite. A version that never
-        // got as far as a multipart upload has nothing to come back to and
-        // stays `failed`, as does one whose owner can no longer send to it.
-        // An account change is no failure of the upload's, so says nothing.
-        patchRow(id, {
-          status: upload_id && version_id && !(err instanceof UploadAccessGoneError) ? 'interrupted' : 'failed',
-          error: isAccountChange(err) ? undefined : err instanceof Error ? err.message : 'Upload failed',
-        })
-        // Only after a completion was attempted can the object be whole with
-        // the version still `uploading`, and only then is it worth a request
-        // to find out.
-        if (completionAttempted && version_id && await finishAssembledUpload(version_id, owner)) {
-          applyLanded('processing')
-        }
-      }
-    }
-
-    // The one and only reason to abort. AbortMultipartUpload discards every
-    // part the backend is holding, and this used to run from the catch of
-    // *any* error -- destroying the bytes that make a resume possible at
-    // exactly the moment they became worth keeping. Everything else is left
-    // for the user to resume or for the reaper to reclaim.
-    //
-    // Sent, not awaited: the run gives its place back now. The abort asks the
-    // API to have storage throw the parts away, and with storage hanging the
-    // API takes its client's whole retry budget to give up (minutes), during
-    // which the queue stood still behind a row that already read "Cancelled"
-    // (e2e S4, APP-BUG-5). `abortCancelled` handles its own answer.
-    //
-    // The cancel is read off the run's own controller as well as the row:
-    // Remove on the cancelled row can take the row away before the request
-    // that was out at the cancel has wound down, and the cancel still stands
-    // (#523). Only `cancelUpload` aborts this controller.
-    if ((controller.signal.aborted || userCancelled()) && upload_id && s3_key && version_id) {
-      void abortCancelled(useUploadStore.setState, { s3_key, upload_id, version_id }, owner)
-    }
-  } finally {
-    watch?.stop()
-    stopBeat()
-    if (abortControllers[id] === controller) delete abortControllers[id]
-    endRun(id, runner, runKey)
-  }
-}
-
-/**
- * A queued resume's turn: ask the server where the upload stands, check nobody
- * else is sending it, then send what is missing and complete (spec goal 11).
- * A `/parts` call that cannot get through holds the queue, exactly as an
- * initiate would; the row goes back to being a queued resume.
- */
-async function runResume(id: string, runner: Runner, runKey: string): Promise<void> {
-  const file = fileRefs.get(id)!
-  // As it stood before this run touched it: `activeElsewhere` judges its stamps.
-  const row = rowById(id)!
-  const versionId = row.versionId!
-  const updateFile = (patch: Partial<UploadFile>) => patchRow(id, patch)
-  // Every request below is sent as this account, or not at all.
-  const owner = row.ownerId
-  const asOwner = { pinSubject: owner }
-  /** Back to plain `interrupted`, still resumable, as the queued resume was. */
-  const standDown = (patch: Partial<UploadFile> = {}) =>
-    updateFile({ status: 'interrupted', resuming: undefined, progress: row.progress, ...patch })
-
-  const controller = new AbortController()
-  abortControllers[id] = controller
-  let info: ResumeInfo | undefined
-  let completionAttempted = false
-  let stopBeat = () => {}
-  let claimNonce: string | undefined
-  let watch: ReturnType<typeof transferWatch> | null = null
-  try {
-    // A resumed row may have stopped while finalizing.
-    updateFile({
-      status: 'starting', resuming: true, queuedResume: undefined, holdReason: undefined,
-      progress: 0, error: undefined, finalizing: false,
-    })
-
-    // Everything needed to carry on comes from the server, including the key
-    // and the upload id: this row may have been rehydrated from history in a
-    // browser that never saw them.
-    const askedAt = Date.now()
-    try {
-      info = await getParts(versionId, asOwner)
-    } catch (err) {
-      const outcome = isAbortError(err) || isFinalRefusal(err) ? null : classifyInitiateError(err)
-      // Cancelled while it asked: the row is already plain `interrupted` again,
-      // whatever this answer says. Only the hold has to hear it.
-      if (runner.stoodDown) {
-        if (outcome?.kind === 'hold' && queue.hold.probeId === id) passOnProbe()
-        else endHoldIfProbe(id)
-        return
-      }
-      // Its owner is no longer signed in: the upload waits for them, as it was.
-      const ownerGone = outcome !== null &&
-        (outcome.kind === 'account' || outcome.kind === 'session_ended' || noticeSubject() !== owner)
-      if (ownerGone && rowById(id)?.status === 'starting') {
-        if (outcome.kind === 'hold') handOffProbe(id)
-        else endHoldIfProbe(id)
-        resumeRequestedAt.delete(id)
-        standDown()
-        return
-      }
-      if (outcome?.kind === 'hold' && rowById(id)?.status === 'starting') {
-        if (!(err instanceof ApiError) && queue.hold.probeId !== id) {
-          console.warn('Upload could not resume; waiting for the connection.', err)
-        }
-        holdRow(id, 'resume', outcome.reason, outcome.retryAfterMs)
-        return
-      }
-      if (outcome?.kind === 'hold' && queue.hold.probeId === id) passOnProbe()
-      else endHoldIfProbe(id)
-      throw err
-    }
-    endHoldIfProbe(id)
-    // Cancelled while it asked. Nothing has been sent and nothing is thrown
-    // away: the parts on the server are what a later Resume carries on from.
-    if (runner.stoodDown) return
-    // The answer came after another account signed in, or after the sign-out.
-    // It is kept for the owner, and nothing is sent.
-    if (noticeSubject() !== owner) {
-      resumeRequestedAt.delete(id)
-      standDown({ uploadId: info.upload_id, s3Key: info.s3_key, versionId: info.version_id, assetId: info.asset_id })
-      return
-    }
-
-    // Two tabs sending the same part numbers into one multipart upload leave
-    // the completing tab with ETags that no longer match what is stored.
-    // Judged as of the click that queued it, which this turn now uses up.
-    const answeredAt = Date.now()
-    const requestedAt = resumeRequestedAt.get(id)
-    const click = requestedAt === undefined ? undefined : { requestedAt, askedAt, rtt: answeredAt - askedAt }
-    const elsewhere = activeElsewhere(row, info, answeredAt, click)
-    resumeRequestedAt.delete(id)
-    if (elsewhere) {
-      const refusedAt = info.last_activity_at
-      info = undefined
-      if (rowById(id)?.status !== 'cancelled') {
-        updateFile({
-          status: 'elsewhere',
-          resuming: undefined,
-          progress: row.progress,
-          elsewhereUntil: liveUntil(refusedAt),
-        })
-      }
-      return
-    }
-    // Another tab of this browser may have been told the same at the same
-    // moment: only the tab whose claim stands goes on (see `RESUME_CLAIM_PREFIX`).
-    const claim = await claimUpload(versionId, controller.signal)
-    claimNonce = claim.nonce
-    // Cancelled while the claim settled: back to plain `interrupted` already.
-    if (runner.stoodDown) return
-    // The settle is a wait: an account change during it is applied as at any
-    // start, whether or not the claim stood. The row goes back to its owner as
-    // plain `interrupted`, theirs to resume; Elsewhere would say someone is
-    // sending it, and the tab that won may stand down for the same reason.
-    if (noticeSubject() !== owner) {
-      standDown({ uploadId: info.upload_id, s3Key: info.s3_key, versionId: info.version_id, assetId: info.asset_id })
-      return
-    }
-    if (!claim.won) {
-      info = undefined
-      if (rowById(id)?.status !== 'cancelled') {
-        updateFile({
-          status: 'elsewhere',
-          resuming: undefined,
-          progress: row.progress,
-          // Until the other tab's heartbeat is in storage, which then keeps it so.
-          elsewhereUntil: Date.now() + CLAIM_TTL_MS,
-        })
-      }
-      return
-    }
-    stopBeat = beatFor(updateFile)
-
-    // The upload id belongs on the row, not only in this closure. A row
-    // without one is read as a transfer that broke before initiate
-    // answered, so `standingOfStoredRow` fails it -- and a resumed row
-    // interrupted again mid-transfer came back as "Upload interrupted"
-    // with nothing but Dismiss, which is precisely the row this feature
-    // exists for: one this browser only knows from `/me/assets`, or one
-    // whose storage was cleared. It is recoverable by dismissing and
-    // reloading, and nobody would guess that.
-    //
-    // The version and asset ids go with it, for the same reason: the two
-    // fresh upload paths record all three in one call and this one
-    // recorded none of them. So does the storage key, which Discard needs
-    // to abort after `/parts` has stopped answering.
-    const held = info.state === 'resumable' ? info.held_part_numbers : []
-    runner.unfinished = info.state === 'resumable'
-      ? Math.max(0, Math.ceil(file.size / info.chunk_size_bytes) - held.length)
-      : 0
-    updateFile({
-      ...(rowById(id)?.status === 'cancelled' ? {} : { status: 'uploading' as const }),
-      resuming: undefined,
-      uploadId: info.upload_id,
-      s3Key: info.s3_key,
-      versionId: info.version_id,
-      assetId: info.asset_id,
-    })
-    pump()
-
-    // `assembled` means the object is whole and only the completion is
-    // outstanding, so the file is not needed and is not checked -- refusing
-    // it over a rename would strand an upload that has nothing left to send.
-    let parts: Array<{ PartNumber: number; ETag: string }> = []
-    if (info.state === 'resumable') {
-      // A browser cannot reopen a local file on its own, so the user picks it
-      // again -- and nothing makes them pick the same one. Name and size are
-      // what can be checked without reading the file; they guard against an
-      // accident rather than prove anything, and a mismatch here is what
-      // would silently corrupt the parts already in the bucket.
-      //
-      // The two checks report separately because they mean different things
-      // to whoever has to act on them: the wrong file is picked again, a
-      // right-named file of the wrong length is a file that changed.
-      //
-      // Both messages lead with the instruction and stay short enough for
-      // one line. The panel row truncates, and naming the file the user just
-      // picked -- the one thing they already know -- used up the whole line
-      // before reaching the part that says what to do about it.
-      if (file.name !== info.original_filename) {
-        throw new Error(`Please select ${info.original_filename}`)
-      }
-      if (file.size !== info.file_size_bytes) {
-        throw new Error('File does not match original')
-      }
-      // The bytes are needed only now: after `/parts` has said so, and not for
-      // an `assembled` upload, which the picked file may be unreadable for and
-      // still complete. A file that changed or moved while the Resume waited
-      // ends the run here, `interrupted` with the reason through the `catch`
-      // below, before any presign. By now `/parts` has answered, so the hold
-      // this row was probing is already over.
-      try {
-        await assertReadable(file)
-      } catch (err) {
-        throw err instanceof FileUnreadableError ? err : new Error(readFailureMessage(err))
-      }
-      const resumeWatch = transferWatch(id, file.size, updateFile)
-      watch = resumeWatch
-      parts = await uploadAllParts(
-        file, info.s3_key, info.upload_id, controller,
-        (percent) => updateFile({ progress: percent, heartbeatAt: Date.now() }),
-        {
-          budget: partBudget,
-          fileKey: runKey,
-          chunkSize: info.chunk_size_bytes,
-          alreadyHeld: held,
-          ownerId: owner,
-          onPartDone: () => updateFile({ heartbeatAt: Date.now() }),
-          onUnfinished: (n) => {
-            runner.unfinished = n
-            pump()
-          },
-          onBytes: resumeWatch.onBytes,
-          onAllSent: resumeWatch.onAllSent,
-          onResend: resumeWatch.onResend,
-        },
-      )
-    }
-
-    completionAttempted = true
-    updateFile({ finalizing: true })
-    await postCompletion({
-      s3_key: info.s3_key,
-      upload_id: info.upload_id,
-      asset_id: info.asset_id,
-      version_id: info.version_id,
-      // Nothing when parts were skipped. This list is only read by a backend
-      // that cannot list its own parts, and a resumed upload cannot produce a
-      // complete one -- it never saw the ETags of the parts it did not send.
-      // Handing over the partial list would complete a truncated object with
-      // no error on most backends; handing over none makes that backend
-      // refuse instead, which is the failure worth having.
-      parts: held.length > 0 ? [] : parts,
-    }, asOwner, controller.signal)
-
-    const isMedia = /^(video|audio|image)\//.test(info.mime_type)
-    updateFile({
-      progress: 100,
-      status: isMedia ? 'processing' : 'complete',
-      processingProgress: 0,
-      assetId: info.asset_id,
-    })
-  } catch (err) {
-    const userCancelled = () => rowById(id)?.status === 'cancelled'
-
-    if (isAbortError(err)) {
-      updateFile({ status: 'cancelled', progress: 0, resuming: undefined })
-    } else {
-      // See runNew: the completion may have landed with only its response
-      // lost, and this is the second time round for this version.
-      //
-      // A refusal is asked the same question. `/parts` answers 409 for any
-      // status that is not `uploading`, which includes `processing` and
-      // `ready`: the upload landed and this tab is the last to hear about
-      // it. Treated as final, that put a red Failed badge reading "This
-      // upload is already ready." on a file that uploaded and transcoded
-      // perfectly. `completedVersionStatus` compares version ids, so a
-      // version that really did fail still falls through to `failed`.
-      const askAbout = info?.asset_id ?? row.assetId
-      const landed = (completionAttempted || isFinalRefusal(err)) && askAbout
-        ? await completedVersionStatus(askAbout, versionId, owner)
-        : null
-      if (landed) {
-        if (!userCancelled()) {
-          updateFile({
-            progress: 100,
-            status: landed,
-            resuming: undefined,
-            processingProgress: landed === 'complete' ? 100 : 0,
-          })
-        }
-      } else if (!userCancelled()) {
-        updateFile({
-          // Back to resumable unless the server said this upload is over, or
-          // that its owner can no longer send to it. Nothing was aborted here
-          // either, so the parts sent this time are held too and the next
-          // attempt starts from further along. An account change says nothing.
-          status: isFinalRefusal(err) || err instanceof UploadAccessGoneError ? 'failed' : 'interrupted',
-          resuming: undefined,
-          progress: 0,
-          error: isAccountChange(err) ? undefined : err instanceof Error ? err.message : 'Upload failed',
-        })
-      }
-    }
-
-    // Sent, not awaited, as in `runNew`: the place is given back now, and a
-    // row removed since the cancel is still aborted.
-    if ((controller.signal.aborted || userCancelled()) && info) {
-      void abortCancelled(useUploadStore.setState, {
-        s3_key: info.s3_key,
-        upload_id: info.upload_id,
-        version_id: info.version_id,
-      }, owner)
-    }
-  } finally {
-    watch?.stop()
-    stopBeat()
-    releaseClaim(versionId, claimNonce)
-    if (abortControllers[id] === controller) delete abortControllers[id]
-    endRun(id, runner, runKey)
-  }
-}
-
-/**
- * Adds new uploads to the back of the queue, as one drop, and starts whatever
- * may start now. Returns the row ids in the order given.
- *
- * Each row belongs to the account whose token is in storage now. With no token
- * nothing is added and none is returned: an upload nobody owns could never be
- * started as anyone. A token for an account the store has not heard of yet is
- * another tab's sign-in whose `storage` event is still on its way, and the
- * account change is applied here, as at a start: the rows of the account before
- * it that have not started fail at once, saved with their owner, before the new
- * account's rows join the queue.
- */
-function enqueueNew(
-  set: (fn: (s: UploadStore) => Partial<UploadStore>) => void,
-  items: Array<{ file: File; assetName: string; target: StartTarget; mimeType?: string }>,
-  projectId: string,
-  projectName: string | undefined,
-): string[] {
-  if (items.length === 0) return []
-  const owner = currentSubject()
-  if (owner === null) return []
-  // Never throws: a refused save of the change is handled in `applySubject`.
-  noticeSubject()
-  const dropSeq = ++dropSeqs
-  const createdAt = Date.now()
-  const rows: UploadFile[] = items.map(({ file, assetName, target, mimeType }) => {
-    const id = newRowId()
-    fileRefs.set(id, file)
-    startTargets.set(id, target)
-    return {
-      id,
-      fileName: file.name,
-      fileSize: file.size,
-      fileType: mimeType ?? file.type,
-      projectId,
-      projectName,
-      assetName,
-      progress: 0,
-      processingProgress: 0,
-      status: 'queued',
-      createdAt,
-      ownerId: owner,
-      dropSeq,
-      ...(target.kind === 'version' ? { assetId: target.assetId } : {}),
-    }
-  })
-  queue.enqueue(rows.map((r) => queueEntry(r, 'new')), 'back')
-  for (const r of rows) r.queueSeq = queue.queueSeq(r.id)
-  try {
-    // Newest first, as rows have always been listed.
-    set((s) => ({ files: [...rows.slice().reverse(), ...s.files], panelOpen: true }))
-  } finally {
-    // The rows are in state even when saving them threw: they still get their turn.
-    pump()
-  }
-  return rows.map((r) => r.id)
-}
-
 const storeCreator: StateCreator<UploadStore, [['zustand/persist', unknown]]> = (set, get) => ({
   files: [],
   subject: currentSubject(),
@@ -3268,24 +2609,16 @@ const storeCreator: StateCreator<UploadStore, [['zustand/persist', unknown]]> = 
   setPanelOpen: (open) => set({ panelOpen: open }),
   togglePanel: () => set((s) => ({ panelOpen: !s.panelOpen })),
 
-  startUpload: (file, projectId, assetName, projectName, folderId) =>
-    enqueueNew(set, [{ file, assetName, target: { kind: 'asset', folderId: folderId ?? null } }], projectId, projectName)[0] ?? null,
+  startUpload: () => {
+    get().addDropNote('Web media uploads have been retired. Use Electron/Ingest.')
+    return null
+  },
 
-  startUploads: (items, projectId, projectName, folderId) =>
-    enqueueNew(
-      set,
-      items.map((item) => ({
-        file: item.file,
-        assetName: item.assetName,
-        mimeType: item.mimeType,
-        target: {
-          kind: 'asset' as const,
-          folderId: item.folderId !== undefined ? item.folderId : (folderId ?? null),
-        },
-      })),
-      projectId,
-      projectName,
-    ),
+  startUploads: (files) => {
+    if (files.length === 0) return []
+    get().addDropNote('Web media uploads have been retired. Use Electron/Ingest.')
+    return []
+  },
 
   addDropNote: (text, ownerId) => {
     const note: DropNote = { id: newRowId(), text, ownerId: ownerId !== undefined ? ownerId : currentSubject() }
@@ -3294,36 +2627,12 @@ const storeCreator: StateCreator<UploadStore, [['zustand/persist', unknown]]> = 
 
   dismissDropNote: (id) => set((s) => ({ dropNotes: s.dropNotes.filter((n) => n.id !== id) })),
 
-  startVersionUpload: (file, assetId, assetName, projectId, projectName) =>
-    enqueueNew(set, [{ file, assetName, target: { kind: 'version', assetId } }], projectId, projectName)[0] ?? null,
-
-  resumeUpload: (fileId, file) => {
-    const row = get().files.find((f) => f.id === fileId)
-    // Not while a run of this row is still settling: a run whose transfer
-    // broke is still asking the server what became of it, and its answer
-    // would land on the row a second run is sending. Nor while a Discard of
-    // it is waiting on the server, which is about to abort what it would send.
-    if (!resumableNow(row)) return
-    fileRefs.set(fileId, file)
-    resumeRequestedAt.set(fileId, Date.now())
-    // A Resume goes ahead of every file not yet started, behind the ones
-    // already running, and takes its turn like them -- so it never sends
-    // beside three active files or outside the part budget.
-    queue.enqueue([queueEntry(row, 'resume')], 'next')
-    set((s) => ({
-      files: s.files.map((f) => (f.id === fileId
-        ? {
-            ...f,
-            queuedResume: true as const,
-            dropSeq: ++dropSeqs,
-            queueSeq: queue.queueSeq(fileId),
-            error: undefined,
-            discardFailed: undefined,
-          }
-        : f)),
-    }))
-    pump()
+  startVersionUpload: () => {
+    get().addDropNote('Upload new versions using Electron/Ingest.')
+    return null
   },
+
+  resumeUpload: () => get().addDropNote('Web uploads cannot be resumed. Use Electron/Ingest.'),
 
   discardUpload: async (fileId) => {
     // Counted for as long as the server is being asked: see `resumeUpload`.
@@ -3335,6 +2644,7 @@ const storeCreator: StateCreator<UploadStore, [['zustand/persist', unknown]]> = 
       // reaper, and the row would keep offering a resume in the meantime.
       const row = get().files.find((f) => f.id === fileId)
       if (!row) return null
+      if (!row.ownerId || currentSubject() !== row.ownerId) return 'Sign in as the upload owner to discard it.'
       const asOwner = { pinSubject: row.ownerId }
       // A queued resume gives up its turn first, before any round trip: its turn
       // coming while this asks the server would start sending into the upload
@@ -3370,7 +2680,7 @@ const storeCreator: StateCreator<UploadStore, [['zustand/persist', unknown]]> = 
         // `/parts` answering 404 says nothing about storage -- and leaving it to
         // the reaper holds every part already sent until then. A row that
         // recorded its key and upload id can abort without being told them.
-        if (isFinalRefusal(err)) {
+        if (isFinalRefusal(err) || (err instanceof ApiError && err.status === 410)) {
           if (row.s3Key && row.uploadId) {
             try {
               await api.post('/upload/abort', {
@@ -3545,34 +2855,12 @@ const storeCreator: StateCreator<UploadStore, [['zustand/persist', unknown]]> = 
   },
 
   retryUpload: (fileId) => {
-    const row = get().files.find((f) => f.id === fileId)
-    if (!row || !retryable(row) || runners.has(fileId)) return
-    // Next, like a Resume: ahead of every file not yet started, and during a
-    // hold behind the probe.
-    queue.enqueue([queueEntry(row, 'new')], 'next')
-    set((s) => ({
-      files: s.files.map((f) => (f.id === fileId
-        ? {
-            ...f,
-            status: 'queued' as const,
-            progress: 0,
-            error: undefined,
-            failedBeforeStart: undefined,
-            retryable: undefined,
-            dropSeq: ++dropSeqs,
-            queueSeq: queue.queueSeq(fileId),
-          }
-        : f)),
-    }))
-    pump()
+    get().addDropNote('Web media uploads have been retired. Use Electron/Ingest.')
   },
 
-  canRetry: (fileId) => {
-    const row = findRow(get(), fileId)
-    return row !== undefined && retryable(row)
-  },
+  canRetry: () => false,
 
-  canResume: (fileId) => resumableNow(findRow(get(), fileId)),
+  canResume: () => false,
 
   renameUpload: async (fileId, name) => {
     const row = get().files.find((f) => f.id === fileId)
@@ -3830,6 +3118,7 @@ const storeCreator: StateCreator<UploadStore, [['zustand/persist', unknown]]> = 
           return withCompletion(f, {
             ...f,
             status,
+            error: version.processing_status === 'processing' ? 'Server processing retired. Prepare and upload a new version with Electron/Ingest.' : f.error,
             elsewhereUntil: stillMoving ? movingUntil : f.elsewhereUntil,
             progress: keepsProgress ? f.progress : 100,
             processingProgress: status === 'complete' ? 100 : 0,

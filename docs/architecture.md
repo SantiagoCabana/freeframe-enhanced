@@ -2,6 +2,12 @@
 
 This document explains how FreeFrame's components work together.
 
+**Fork behavior:** media is prepared locally with Electron and registered by the
+separate Ingest service. No server multimedia worker or FFmpeg binary is shipped.
+The historical upload/pipeline sections below describe upstream data layouts and
+existing media, not an available processing service. The current API retirement,
+download and transition contracts are in [media preparation](media-preparation.md).
+
 ---
 
 ## System Overview
@@ -31,7 +37,7 @@ FreeFrame is a monorepo with two main applications and supporting infrastructure
                                ┌──────────┴──────────┐
                                ▼                     ▼
                         ┌─────────────┐       ┌─────────────┐
-                        │  Transcoding │       │    Email     │
+                         │ Maintenance │       │    Email     │
                         │   Workers    │       │   Workers    │
                         └─────────────┘       └─────────────┘
 ```
@@ -44,7 +50,7 @@ FreeFrame is a monorepo with two main applications and supporting infrastructure
 | **PostgreSQL** | Primary datastore for all entities (users, projects, assets, comments, etc.) |
 | **Redis** | Message broker for Celery task queues, magic code TTL storage |
 | **S3 Storage** | Stores all media files (originals, transcoded outputs, thumbnails) |
-| **Transcoding Workers** | Celery workers that process video/audio/image files via FFmpeg |
+| **Electron / Ingest** | Separate applications: local video preparation, direct object upload and HLS version registration |
 | **Email Workers** | Celery workers that send transactional emails (invites, magic codes, notifications) |
 | **Maintenance Worker** | Celery worker for scheduled housekeeping: retention GC, stale-upload reaper, orphan sweep |
 | **Beat** | Celery scheduler that publishes the periodic maintenance tasks |
@@ -53,7 +59,7 @@ FreeFrame is a monorepo with two main applications and supporting infrastructure
 
 ## Data Flow
 
-### Upload and Processing
+### Historical upstream upload and processing (retired)
 
 ```
 User uploads file
@@ -114,7 +120,7 @@ Reviewer approves / rejects ──▶ SSE: approval_updated
 
 ---
 
-## Media Processing Pipeline
+## Historical Media Processing Pipeline (retired)
 
 ### Video
 

@@ -153,45 +153,36 @@ afterEach(() => {
 })
 
 describe('dropping a folder on the project page', () => {
-  it('uploads the folder’s files into a folder of the same name, never the folder itself', async () => {
+  it('does not allocate folders or uploads when a folder is dropped', async () => {
     render(page())
     const drop = folderDrop('Shoot', ['a.mov', 'b.wav'])
 
     dropOn(screen.getByTestId('grid'), drop.dataTransfer)
     drop.expire()
 
-    await waitFor(() => expect(rows().map((r) => r.fileName).sort()).toEqual(['a.mov', 'b.wav']))
-    expect(ensureBodies()).toEqual([{ parent_id: 'f-here', paths: [['Shoot']] }])
-    for (const r of rows()) expect(testing.folderOf(r.id)).toBe('id:Shoot')
-    expect(rows().map((r) => r.fileName)).not.toContain('Shoot')
+    expect(rows()).toEqual([])
+    expect(ensureBodies()).toEqual([])
+    expect(api.post).not.toHaveBeenCalled()
   })
 })
 
 describe('the Upload button', () => {
-  it('is a menu of Upload files and Upload folder, with no upload dialog', async () => {
+  it('explains external preparation without offering file pickers', async () => {
     render(page())
 
     await userEvent.click(screen.getByRole('button', { name: 'Upload' }))
 
-    expect(screen.getByRole('menuitem', { name: /Upload files/ })).toBeInTheDocument()
-    expect(screen.getByRole('menuitem', { name: /Upload folder/ })).toBeInTheDocument()
+    expect(screen.getByText(/Electron\/Ingest/)).toBeInTheDocument()
+    expect(document.querySelector('input[type="file"]')).toBeNull()
     expect(screen.queryByText('Upload asset')).toBeNull()
     expect(screen.queryByText(/Drag files and folders/)).toBeNull()
   })
 
-  it('starts a picked folder at once, into the folder on screen', async () => {
+  it('cannot pick a folder or allocate destination folders', async () => {
     render(page())
-    const a = new File([new Uint8Array(4)], 'a.mov')
-    Object.defineProperty(a, 'webkitRelativePath', { value: 'Shoot/Day 1/a.mov' })
-    const input = screen.getByTestId('upload-folder-input')
-    Object.defineProperty(input, 'files', { value: [a], configurable: true })
-
-    fireEvent.change(input)
-
-    await waitFor(() => expect(rows().map((r) => r.fileName)).toEqual(['a.mov']))
-    expect(ensureBodies()).toEqual([{ parent_id: 'f-here', paths: [['Shoot', 'Day 1']] }])
-    expect(testing.folderOf(rows()[0].id)).toBe('id:Shoot/Day 1')
-    expect(rows()[0].fileType).toBe('video/quicktime')
+    expect(screen.queryByTestId('upload-folder-input')).toBeNull()
+    expect(rows()).toEqual([])
+    expect(api.post).not.toHaveBeenCalled()
   })
 
   it('opens the same menu from the empty state’s Upload button', async () => {
@@ -199,19 +190,19 @@ describe('the Upload button', () => {
 
     await userEvent.click(screen.getByRole('button', { name: 'Upload your first asset' }))
 
-    expect(await screen.findByRole('menuitem', { name: /Upload folder/ })).toBeInTheDocument()
+    expect(await screen.findByText(/Electron\/Ingest/)).toBeInTheDocument()
   })
 })
 
 describe('who is offered an upload', () => {
-  it.each(['owner', 'editor'])('a project %s gets the Upload menu, the empty-state button and both inputs', (role) => {
+  it.each(['owner', 'editor'])('a project %s gets preparation guidance without inputs', (role) => {
     member.role = role
     render(page())
 
     expect(screen.getByRole('button', { name: 'Upload' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Upload your first asset' })).toBeInTheDocument()
-    expect(screen.getByTestId('upload-files-input')).toBeInTheDocument()
-    expect(screen.getByTestId('upload-folder-input')).toBeInTheDocument()
+    expect(screen.queryByTestId('upload-files-input')).toBeNull()
+    expect(screen.queryByTestId('upload-folder-input')).toBeNull()
   })
 
   it.each(['reviewer', 'viewer'])('a project %s gets no Upload menu, no empty-state button and no inputs', (role) => {

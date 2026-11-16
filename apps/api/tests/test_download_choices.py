@@ -5,7 +5,7 @@ for a video, the MP3 or WebP for audio and stills -- with no way to get the
 file that was actually uploaded. The menu now lists the original and whichever
 transcode already exists as a single file, and the stream endpoint serves the
 one asked for. Nothing new is produced to offer a choice: a video's lower rungs
-are HLS segments, not files, and are not on the list.
+are available together as an unchanged HLS ZIP package.
 """
 import uuid
 from contextlib import ExitStack
@@ -38,18 +38,19 @@ def test_a_video_offers_its_original_and_its_mp4():
     choices = downloads.download_choices(AssetType.video, _media_file(), allow_original=True)
 
     assert [(c.id, c.format, c.s3_key) for c in choices] == [
+        ("hls", "ZIP", "processed/p/a/v"),
         ("original", "MOV", "raw/p/a/v/original.mov"),
         ("transcode", "MP4", "processed/p/a/v/download.mp4"),
     ]
     # The original's size is on the row; nobody has to ask storage for it.
-    assert choices[0].size_bytes == 5_000_000_000
+    assert choices[1].size_bytes == 5_000_000_000
 
 
-def test_a_video_with_no_mp4_offers_only_the_original():
+def test_a_video_with_no_mp4_offers_hls_and_the_original():
     # Transcoded before the MP4 existed, or its remux failed: the ladder is
     # segments, so there is no transcode file to hand out.
     choices = downloads.download_choices(AssetType.video, _media_file(s3_key_download=None), allow_original=True)
-    assert [c.id for c in choices] == ["original"]
+    assert [c.id for c in choices] == ["hls", "original"]
 
 
 def test_audio_and_stills_offer_their_single_transcode():
@@ -105,9 +106,10 @@ def test_the_video_transcode_is_labelled_with_its_rung():
          patch.object(downloads, "head_object_size", return_value=900_000_000):
         downloads.describe_choices(AssetType.video, mf, choices)
 
-    assert choices[1].label == "1080p"
-    assert choices[1].size_bytes == 900_000_000
-    assert choices[0].size_bytes == 5_000_000_000
+    assert choices[2].label == "1080p"
+    assert choices[2].size_bytes == 900_000_000
+    assert choices[1].size_bytes == 5_000_000_000
+    assert choices[0].size_bytes is None
 
 
 def test_a_portrait_transcode_is_labelled_by_its_short_side():
@@ -125,7 +127,7 @@ def test_a_portrait_transcode_is_labelled_by_its_short_side():
          patch.object(downloads, "head_object_size", return_value=900_000_000):
         downloads.describe_choices(AssetType.video, mf, choices)
 
-    assert choices[1].label == "1080p"
+    assert choices[2].label == "1080p"
 
 
 def test_storage_that_will_not_answer_leaves_a_working_menu():
@@ -137,8 +139,8 @@ def test_storage_that_will_not_answer_leaves_a_working_menu():
          patch.object(downloads, "head_object_size", side_effect=RuntimeError("nope")):
         downloads.describe_choices(AssetType.video, mf, choices)
 
-    assert [c.label for c in choices] == ["Original", "Transcode"]
-    assert choices[1].size_bytes is None
+    assert [c.label for c in choices] == ["HLS package", "Original", "Transcode"]
+    assert choices[2].size_bytes is None
 
 
 # ─────────────────────────────────── the endpoints
@@ -256,6 +258,7 @@ def test_the_downloads_endpoint_lists_the_choices(
 
     assert response.status_code == 200, response.text
     assert response.json() == [
+        {"id": "hls", "label": "HLS package", "format": "ZIP", "size_bytes": None},
         {"id": "original", "label": "Original", "format": "MOV", "size_bytes": 5_000_000_000},
         {"id": "transcode", "label": "720p", "format": "MP4", "size_bytes": None},
     ]
@@ -331,7 +334,7 @@ def test_a_share_link_download_can_be_the_original_when_the_instance_allows_it(
 
 def test_without_the_original_a_video_offers_only_its_transcode():
     choices = downloads.download_choices(AssetType.video, _media_file(), allow_original=False)
-    assert [c.id for c in choices] == ["transcode"]
+    assert [c.id for c in choices] == ["hls", "transcode"]
 
 
 def test_without_the_original_a_video_with_no_mp4_still_offers_its_master():
@@ -339,7 +342,7 @@ def test_without_the_original_a_video_with_no_mp4_still_offers_its_master():
     choices = downloads.download_choices(
         AssetType.video, _media_file(s3_key_download=None), allow_original=False
     )
-    assert [c.id for c in choices] == ["original"]
+    assert [c.id for c in choices] == ["hls", "original"]
 
 
 def test_asking_for_the_original_without_leave_is_refused_not_missing():
@@ -397,7 +400,8 @@ def test_the_setting_reads_as_off_before_anyone_saves_it(mock_db):
 def test_an_mp4_upload_and_its_mp4_transcode_download_under_different_names():
     mf = _media_file(s3_key_raw="raw/p/a/v/original.mp4", original_filename="Portrait.mp4")
     asset = SimpleNamespace(name="Portrait", asset_type=AssetType.video)
-    original, transcode = downloads.download_choices(AssetType.video, mf, allow_original=True)
+    hls, original, transcode = downloads.download_choices(AssetType.video, mf, allow_original=True)
+    assert downloads.download_filename(asset, mf, hls) == "Portrait.zip"
     master = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1,RESOLUTION=720x1280\n0/playlist.m3u8\n"
 
     with patch.object(downloads, "get_s3_client", return_value=_s3_with_master(master)):
@@ -408,7 +412,7 @@ def test_an_mp4_upload_and_its_mp4_transcode_download_under_different_names():
 def test_a_transcode_in_another_format_keeps_the_plain_name():
     mf = _media_file()
     asset = SimpleNamespace(name="Hero Spot", asset_type=AssetType.video)
-    transcode = downloads.download_choices(AssetType.video, mf, allow_original=True)[1]
+    transcode = downloads.download_choices(AssetType.video, mf, allow_original=True)[2]
     assert downloads.download_filename(asset, mf, transcode) == "Hero Spot.mp4"
 
 
@@ -462,7 +466,7 @@ def test_a_public_project_visitor_is_not_offered_the_original(
         response = client.get(f"/assets/{asset.id}/downloads", headers=auth_headers)
 
     assert response.status_code == 200, response.text
-    assert [o["id"] for o in response.json()] == ["transcode"]
+    assert [o["id"] for o in response.json()] == ["hls", "transcode"]
 
 
 @patch("apps.api.routers.assets.generate_presigned_get_url", return_value="https://s3/x")
@@ -527,6 +531,7 @@ def _share_stream(client, asset, query):
     return client.get(f"/share/some-token/stream/{asset.id}?{query}")
 
 
+@pytest.mark.parametrize("rendition", ["original", "hls"])
 @patch("apps.api.routers.share._log_share_activity")
 @patch("apps.api.routers.share.generate_presigned_get_url", return_value="https://s3/x")
 @patch("apps.api.routers.share._get_latest_media_file")
@@ -535,7 +540,7 @@ def _share_stream(client, asset, query):
 @patch("apps.api.routers.share.validate_share_link_with_session")
 def test_a_link_with_downloads_off_does_not_hand_out_the_original(
     mock_validate, mock_validate_in_share, mock_get_asset,
-    mock_get_latest_media_file, mock_presign, mock_log_activity, client, mock_db,
+    mock_get_latest_media_file, mock_presign, mock_log_activity, client, mock_db, rendition,
 ):
     # Everything after the allow_download check would succeed, so only that
     # check stands between this request and the master.
@@ -545,10 +550,39 @@ def test_a_link_with_downloads_off_does_not_hand_out_the_original(
     mock_get_latest_media_file.return_value = _media_file(duration_seconds=12.0)
 
     with _outsider(allow_original_downloads=True):
-        response = _share_stream(client, asset, "download=true&rendition=original")
+        response = _share_stream(client, asset, f"download=true&rendition={rendition}")
 
     assert response.status_code == 403
     mock_presign.assert_not_called()
+
+
+@patch("apps.api.routers.share._log_share_activity")
+@patch("apps.api.routers.share._get_latest_media_file")
+@patch("apps.api.routers.share._get_asset")
+@patch("apps.api.routers.share.validate_asset_in_share")
+@patch("apps.api.routers.share.validate_share_link_with_session")
+def test_ingest_only_share_download_mints_archive_not_original(
+    validate, validate_asset, get_asset, get_media, activity, client,
+):
+    from urllib.parse import parse_qs, urlsplit
+    from apps.api.services.hls_download import archive_claims
+
+    validate.return_value = _share_link()
+    asset = _share_asset()
+    get_asset.return_value = asset
+    get_media.return_value = _media_file(
+        s3_key_raw="processed/p/a/v/master.m3u8", s3_key_download=None,
+        duration_seconds=12.0,
+    )
+    with _outsider():
+        response = _share_stream(client, asset, "download=true")
+    assert response.status_code == 200, response.text
+    url = response.json()["url"]
+    assert urlsplit(url).path == "/stream/hls-download"
+    claims = archive_claims(parse_qs(urlsplit(url).query)["token"][0])
+    assert claims["pfx"] == "processed/p/a/v"
+    validate_asset.assert_called_once()
+    assert activity.call_args.kwargs["rendition"] == "hls"
 
 
 @patch("apps.api.services.downloads.head_object_size", return_value=None)
@@ -598,8 +632,8 @@ def test_a_share_list_offers_the_original_only_when_the_instance_allows_it(
     with _outsider(allow_original_downloads=True):
         on = client.get(f"/share/some-token/downloads/{asset.id}")
 
-    assert [o["id"] for o in off.json()] == ["transcode"]
-    assert [o["id"] for o in on.json()] == ["original", "transcode"]
+    assert [o["id"] for o in off.json()] == ["hls", "transcode"]
+    assert [o["id"] for o in on.json()] == ["hls", "original", "transcode"]
 
 
 @patch("apps.api.routers.share._log_share_activity")

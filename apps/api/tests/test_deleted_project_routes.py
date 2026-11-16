@@ -259,11 +259,8 @@ def storage(monkeypatch):
             raise StorageReached(name)
         return call
 
-    for name in ("presign_upload_part", "list_upload_parts", "complete_multipart_upload",
-                 "abort_multipart_upload", "head_object_size"):
+    for name in ("abort_multipart_upload",):
         monkeypatch.setattr(upload_module, name, stub(name))
-    for module in (assets_module, upload_module):
-        monkeypatch.setattr(module, "create_multipart_upload", lambda key, mime: "up-new")
     return reached
 
 
@@ -279,6 +276,10 @@ def test_the_route_works_on_the_live_project(client, db, storage, name, who, met
     w = _seed(db)
     _seed_more(db, w)
     r = _request(client, w, who, method, path, body)
+    if name.startswith("upload-") or name in ("asset-new-version", "asset-apply-watermark"):
+        assert r.status_code == 410
+        assert storage == []
+        return
     assert r.status_code < 300 or storage, (name, r.status_code, r.text)
 
 
@@ -289,6 +290,10 @@ def test_the_route_is_refused_once_the_project_is_deleted(client, db, storage, n
     _seed_more(db, w)
     _trash_project(client, db, w)
     r = _request(client, w, who, method, path, body)
+    if name.startswith("upload-") or name in ("asset-new-version", "asset-apply-watermark"):
+        assert r.status_code == 410
+        assert storage == []
+        return
     assert (r.status_code, r.json()) == refused, (name, r.status_code, r.text)
     assert storage == [], name
 
@@ -339,7 +344,6 @@ def test_aborting_an_upload_into_a_deleted_project_still_resolves_it(client, db,
 
     aborted = []
     monkeypatch.setattr(upload_module, "abort_multipart_upload", lambda key, uid: aborted.append(uid))
-    monkeypatch.setattr(upload_module, "head_object_size", lambda key: 0)
     w = _seed(db)
     _seed_more(db, w)
     _trash_project(client, db, w)
@@ -357,9 +361,8 @@ def _abort_assembled(client, db, monkeypatch, trash):
 
     triggered = []
     monkeypatch.setattr(upload_module, "abort_multipart_upload", lambda key, uid: None)
-    monkeypatch.setattr(upload_module, "head_object_size", lambda key: 1000)
-    monkeypatch.setattr(upload_module, "_trigger_processing",
-                        lambda asset_id, version_id: triggered.append(version_id))
+    monkeypatch.setattr("apps.api.tasks.celery_app.send_task_safe",
+                        lambda *args, **kwargs: triggered.append(args))
     w = _seed(db)
     _seed_more(db, w)
     if trash:
@@ -370,12 +373,12 @@ def _abort_assembled(client, db, monkeypatch, trash):
     return w, triggered
 
 
-def test_aborting_an_assembled_upload_promotes_it_in_a_live_project(client, db, monkeypatch):
-    """The control: an assembled object is recorded as processing and transcoded."""
+def test_aborting_an_assembled_upload_does_not_process_it_in_a_live_project(client, db, monkeypatch):
+    """Retiring a pending upload never creates a multimedia job."""
     from apps.api.models.asset import ProcessingStatus
     w, triggered = _abort_assembled(client, db, monkeypatch, trash=False)
-    assert w.upload.processing_status == ProcessingStatus.processing
-    assert triggered == [w.upload.id]
+    assert w.upload.processing_status == ProcessingStatus.failed
+    assert triggered == []
 
 
 def test_aborting_an_assembled_upload_never_promotes_it_into_a_deleted_project(client, db, monkeypatch):

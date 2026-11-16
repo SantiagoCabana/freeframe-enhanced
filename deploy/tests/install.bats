@@ -20,6 +20,12 @@ setup() {
   # Where `install` puts the freeframe command (never the real /usr/local/bin).
   export FF_BIN_DIR="$BATS_TEST_TMPDIR/bin-dir"
   ENV="$FF_ROOT/.env.prod"
+  # These inherited GPU scenarios exercise installs of older worker-based releases.
+  if [[ ( $BATS_TEST_DESCRIPTION == gpu:* || $BATS_TEST_DESCRIPTION == gpu\ * ) && $BATS_TEST_DESCRIPTION != *unknown* ]]; then
+    mkdir -p "$FF_ROOT"
+    printf 'services:\n  worker:\n    image: legacy-api\n' >"$FF_ROOT/docker-compose.prod.yml"
+    export STUB_LEGACY_MEDIA_WORKER=1
+  fi
 }
 
 os_release() {

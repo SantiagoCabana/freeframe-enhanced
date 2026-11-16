@@ -88,12 +88,8 @@ def _initiate_failing(client, auth_headers, mock_db, monkeypatch, path, exc):
     def _raise(key, mime):
         raise exc
 
-    for mod in (upload_module, assets_module):
-        monkeypatch.setattr(mod, "upload_guard_error", lambda db, n: None)
-        monkeypatch.setattr(mod, "choose_part_size", lambda db, n: (10 * 1024 * 1024, None))
-        monkeypatch.setattr(mod, "require_project_role", lambda *a, **k: None)
-        monkeypatch.setattr(mod, "next_version_number", lambda db, a: 1)
-        monkeypatch.setattr(mod, "create_multipart_upload", _raise)
+    storage = MagicMock(side_effect=_raise)
+    monkeypatch.setattr(s3_service, "create_multipart_upload", storage)
 
     def _add(obj):
         if getattr(obj, "id", None) is None:
@@ -110,9 +106,12 @@ def _initiate_failing(client, auth_headers, mock_db, monkeypatch, path, exc):
     }
     if path == "new_asset":
         mock_db.first.return_value = MagicMock()  # the project
-        return client.post("/upload/initiate", json=body, headers=auth_headers)
-    mock_db.first.return_value = MagicMock(project_id=project_id)  # the asset
-    return client.post(f"/assets/{uuid.uuid4()}/versions", json=body, headers=auth_headers)
+        response = client.post("/upload/initiate", json=body, headers=auth_headers)
+    else:
+        response = client.post(f"/assets/{uuid.uuid4()}/versions", json=body, headers=auth_headers)
+    storage.assert_not_called()
+    mock_db.add.assert_not_called()
+    return response
 
 
 def _detail(resp):
@@ -144,17 +143,13 @@ def _detail(resp):
     "ConnectionClosedError", "HTTPClientError", "SSLError-EOF", "SSLError-closed", "SSLError-reset",
     "SSLError-EOF-text", "SSLError-EOF-named-host",
 ])
-def test_connection_failures_answer_coded_503(
+def test_retirement_does_not_contact_unreachable_storage(
     client, auth_headers, mock_db, monkeypatch, path, exc
 ):
     resp = _initiate_failing(client, auth_headers, mock_db, monkeypatch, path, exc)
 
-    assert resp.status_code == 503, resp.text
-    detail = _detail(resp)
-    assert detail["code"] == "storage_unavailable"
-    assert detail["retry_after"] == 5
-    assert detail["message"] == "Could not reach storage to start this upload. Please retry."
-    assert resp.headers["Retry-After"] == "5"
+    assert resp.status_code == 410, resp.text
+    assert "Retry-After" not in resp.headers
     mock_db.commit.assert_not_called()
 
 
@@ -177,18 +172,15 @@ def test_connection_failures_answer_coded_503(
     ("TooManyRequests", 400),
     ("RequestThrottled", 400),
 ])
-def test_storage_5xx_and_throttling_answer_coded_503(
+def test_retirement_does_not_retry_storage_throttling(
     client, auth_headers, mock_db, monkeypatch, path, code, status
 ):
     resp = _initiate_failing(
         client, auth_headers, mock_db, monkeypatch, path, _client_error(code, status)
     )
 
-    assert resp.status_code == 503, resp.text
-    detail = _detail(resp)
-    assert detail["code"] == "storage_unavailable"
-    assert detail["retry_after"] == 5
-    assert resp.headers["Retry-After"] == "5"
+    assert resp.status_code == 410, resp.text
+    assert "Retry-After" not in resp.headers
     mock_db.commit.assert_not_called()
 
 
@@ -208,29 +200,24 @@ def test_storage_5xx_and_throttling_answer_coded_503(
     _tls(ssl.SSLError(1, "[SSL: TLSV1_ALERT_PROTOCOL_VERSION] tlsv1 alert protocol version (_ssl.c:1006)")),
 ], ids=["AccessDenied", "NoSuchBucket", "NotImplemented-501", "SSLError", "SSLError-cert", "SSLError-wrong-version",
         "SSLError-protocol-version"])
-def test_storage_refusals_answer_coded_500(
+def test_retirement_does_not_contact_misconfigured_storage(
     client, auth_headers, mock_db, monkeypatch, path, exc
 ):
     resp = _initiate_failing(client, auth_headers, mock_db, monkeypatch, path, exc)
 
-    assert resp.status_code == 500, resp.text
-    detail = _detail(resp)
-    assert detail == {
-        "code": "storage_error",
-        "message": "Storage refused the upload. Ask your admin to check the storage settings.",
-    }
+    assert resp.status_code == 410, resp.text
     assert "Retry-After" not in resp.headers
     mock_db.commit.assert_not_called()
 
 
 @pytest.mark.parametrize("path", ROUTES)
-def test_programming_errors_stay_plain_500(client, auth_headers, mock_db, monkeypatch, path):
+def test_retirement_does_not_construct_storage_requests(client, auth_headers, mock_db, monkeypatch, path):
     resp = _initiate_failing(
         client, auth_headers, mock_db, monkeypatch, path,
         ParamValidationError(report="Invalid bucket name"),
     )
 
-    assert resp.status_code == 500
+    assert resp.status_code == 410
     assert _detail(resp) is None or "code" not in _detail(resp)
     mock_db.commit.assert_not_called()
 
@@ -240,11 +227,11 @@ def test_programming_errors_stay_plain_500(client, auth_headers, mock_db, monkey
     EndpointConnectionError(endpoint_url=ENDPOINT),
     _client_error("AccessDenied", 403),
 ], ids=["503", "500"])
-def test_rollback_called_before_coded_error(client, auth_headers, mock_db, monkeypatch, path, exc):
+def test_retirement_needs_no_database_transaction(client, auth_headers, mock_db, monkeypatch, path, exc):
     resp = _initiate_failing(client, auth_headers, mock_db, monkeypatch, path, exc)
 
-    assert _detail(resp) is not None
-    mock_db.rollback.assert_called_once()
+    assert resp.status_code == 410
+    mock_db.rollback.assert_not_called()
 
 
 # -- the browser can read Retry-After -----------------------------------------

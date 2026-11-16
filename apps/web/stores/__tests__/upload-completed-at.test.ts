@@ -44,22 +44,17 @@ afterEach(() => {
 })
 
 describe('completedAt', () => {
-  it('a file that waited 25 minutes and then uploaded records when it finished, not when it was added', async () => {
+  it('refusing a historical retry does not invent a completion timestamp', async () => {
     vi.useFakeTimers({ toFake: ['Date'] })
     const added = new Date('2026-10-23T10:00:00Z').getTime()
     vi.setSystemTime(added)
-    const server = fakeServer(() => 'wait')
-    // Not media: `/upload/complete` makes it complete at once.
-    const [id] = drop([fileOf('notes.txt', MB, 'text/plain')])
-    await settle()
+    useUploadStore.setState({ files: [row({ id: 'old', status: 'interrupted', createdAt: added })] })
 
     vi.setSystemTime(added + 25 * MINUTE)
-    server.initiates[0].resolve()
-    await vi.waitFor(() => expect(rowOf(id).status).toBe('complete'))
-
-    expect(rowOf(id).createdAt).toBeLessThan(added + MINUTE)
-    expect(rowOf(id).completedAt).toBeGreaterThanOrEqual(added + 25 * MINUTE)
-    expect(rowOf(id).completedAt).toBeLessThan(added + 26 * MINUTE)
+    await useUploadStore.getState().resumeUpload('old', fileOf('notes.txt', MB, 'text/plain'))
+    expect(rowOf('old')).toMatchObject({ status: 'interrupted', createdAt: added })
+    expect(rowOf('old').completedAt).toBeUndefined()
+    expect(api.post).not.toHaveBeenCalled()
   })
 
   it('a transcode that finishes records it, on a row added three days ago', () => {
