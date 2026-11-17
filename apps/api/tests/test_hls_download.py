@@ -46,7 +46,7 @@ def test_archive_follows_nested_playlists_not_unrelated_original():
     assert all(call.kwargs.get("IfMatch") == '"etag"' for call in s3.get_object.call_args_list[2:])
 
 
-@pytest.mark.parametrize("reference", ["../other/file.ts", "/other/file.ts", "https://example.test/file.ts", "//example.test/file.ts", "%2e%2e/file.ts", "a\\file.ts", "a\x00.ts", "a\t.ts", "http://[invalid/file.ts"])
+@pytest.mark.parametrize("reference", ["../other/file.ts", "..\\other\\file.ts", "/other/file.ts", "https://example.test/file.ts", "//example.test/file.ts", "%2e%2e/file.ts", "a\x00.ts", "a\t.ts", "http://[invalid/file.ts"])
 def test_archive_rejects_outside_references(reference):
     s3 = storage({"p/master.m3u8": f"#EXTM3U\n{reference}\n".encode()})
     with patch("apps.api.services.hls_download.get_s3_client", return_value=s3):
@@ -54,6 +54,17 @@ def test_archive_rejects_outside_references(reference):
             archive_objects("p")
     assert exc.value.status_code == 409
     s3.head_object.assert_not_called()
+
+
+def test_archive_normalizes_windows_paths_in_playlist_and_zip():
+    s3 = storage({"p/master.m3u8": b"#EXTM3U\n1080p\\playlist.m3u8\n",
+                  "p/1080p/playlist.m3u8": b"#EXTM3U\nsegment.ts\n",
+                  "p/1080p/segment.ts": b"data"})
+    with patch("apps.api.services.hls_download.get_s3_client", return_value=s3):
+        payload = b"".join(archive_chunks(archive_objects("p")))
+    with zipfile.ZipFile(io.BytesIO(payload)) as archive:
+        assert b"1080p/playlist.m3u8" in archive.read("master.m3u8")
+        assert archive.read("1080p/segment.ts") == b"data"
 
 
 def test_archive_handles_playlist_cycles_once():

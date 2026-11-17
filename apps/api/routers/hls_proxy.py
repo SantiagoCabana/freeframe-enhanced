@@ -19,7 +19,7 @@ from urllib.parse import quote
 
 from ..config import settings
 from ..services.s3_service import generate_presigned_get_url, get_s3_client
-from ..services.hls_download import archive_claims, archive_objects, archive_chunks
+from ..services.hls_download import archive_claims, archive_objects, archive_chunks, resolve_hls_reference
 from ..middleware.rate_limit import rate_limit
 
 logger = logging.getLogger(__name__)
@@ -100,7 +100,6 @@ def _rewrite_manifest(
     - .m3u8 references -> proxy URLs with token (appended as query param)
     - .ts references -> presigned S3 URLs
     """
-    manifest_dir = posixpath.dirname(manifest_path)
     lines = content.split("\n")
     result = []
 
@@ -112,15 +111,12 @@ def _rewrite_manifest(
             result.append(line)
             continue
 
-        # Resolve segment/playlist path relative to current manifest directory
-        if manifest_dir:
-            relative_key = f"{manifest_dir}/{stripped}"
-        else:
-            relative_key = stripped
+        # Resolve Windows-generated playlist paths within the version prefix.
+        stripped, relative_key = resolve_hls_reference(manifest_path, stripped)
 
         if stripped.endswith(".m3u8"):
             # Variant playlist -> proxy URL with token
-            result.append(f"{relative_key}?token={token}")
+            result.append(f"/stream/hls/{quote(relative_key, safe='/')}?token={quote(token, safe='')}")
         elif stripped.endswith(".ts"):
             # Segment -> presigned S3 URL (direct to S3), signed for what is
             # left of the token, so pause-and-resume works for as long as the

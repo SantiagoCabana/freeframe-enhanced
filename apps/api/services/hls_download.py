@@ -37,6 +37,22 @@ def archive_claims(token: str) -> dict:
     return claims
 
 
+def resolve_hls_reference(name: str, ref: str) -> tuple[str, str]:
+    if any(ord(char) < 32 or ord(char) == 127 for char in ref):
+        raise HTTPException(status_code=409, detail="Invalid HLS reference")
+    ref = ref.replace("\\", "/")
+    try:
+        url = urlsplit(ref)
+    except ValueError:
+        raise HTTPException(status_code=409, detail="Invalid HLS reference")
+    target = posixpath.normpath(posixpath.join(posixpath.dirname(name), ref))
+    if (url.scheme or url.netloc or url.query or url.fragment
+            or ref.startswith("/") or "%" in ref
+            or target in (".", "..") or target.startswith("../")):
+        raise HTTPException(status_code=409, detail="HLS contains a non-local reference")
+    return ref, target
+
+
 def archive_objects(prefix: str) -> list[dict]:
     """Follow only the playlist graph, never unrelated originals in the same prefix."""
     s3 = get_s3_client()
@@ -66,28 +82,21 @@ def archive_objects(prefix: str) -> list[dict]:
                 raise HTTPException(status_code=409, detail="Invalid HLS playlist")
             if not text.startswith("#EXTM3U"):
                 raise HTTPException(status_code=409, detail="Invalid HLS playlist")
-            obj.update(data=data, size=len(data))
+            normalized_lines = []
             for line in text.splitlines():
-                line = line.strip()
-                refs = re.findall(r'URI="([^"]+)"', line) if line.startswith("#") else [line]
+                stripped = line.strip()
+                refs = re.findall(r'URI="([^"]+)"', stripped) if stripped.startswith("#") else [stripped]
                 for ref in filter(None, refs):
-                    # ZIP filenames truncate at NUL; reject controls before URL normalization.
-                    if any(ord(char) < 32 or ord(char) == 127 for char in ref):
-                        raise HTTPException(status_code=409, detail="Invalid HLS reference")
-                    try:
-                        url = urlsplit(ref)
-                    except ValueError:
-                        raise HTTPException(status_code=409, detail="Invalid HLS reference")
-                    target = posixpath.normpath(posixpath.join(posixpath.dirname(name), ref))
-                    if (url.scheme or url.netloc or url.query or url.fragment
-                            or ref.startswith("/") or "\\" in ref or "%" in ref
-                            or target in (".", "..") or target.startswith("../")):
-                        raise HTTPException(status_code=409, detail="HLS contains a non-local reference")
+                    normalized, target = resolve_hls_reference(name, ref)
+                    line = line.replace(ref, normalized)
                     if target not in seen:
                         seen.add(target)
                         if len(seen) > 20000:
                             raise HTTPException(status_code=409, detail="Too many HLS archive files")
                         pending.append(target)
+                normalized_lines.append(line)
+            data = ("\n".join(normalized_lines) + ("\n" if text.endswith("\n") else "")).encode("utf-8")
+            obj.update(data=data, size=len(data))
         else:
             response = s3.head_object(Bucket=settings.s3_bucket, Key=key)
             obj.update(size=response["ContentLength"], etag=response["ETag"])

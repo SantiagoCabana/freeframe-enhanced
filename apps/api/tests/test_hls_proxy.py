@@ -53,6 +53,17 @@ class TestVerifyHlsToken:
 class TestRewriteManifest:
     """Tests for m3u8 manifest URL rewriting."""
 
+    def test_windows_variant_reference_is_normalized(self):
+        from apps.api.routers.hls_proxy import _rewrite_manifest
+        result = _rewrite_manifest("#EXTM3U\n1080p\\playlist.m3u8", "p", "master.m3u8", "token")
+        assert "/stream/hls/1080p/playlist.m3u8?token=token" in result
+
+    def test_windows_traversal_is_rejected(self):
+        from apps.api.routers.hls_proxy import _rewrite_manifest
+        with pytest.raises(Exception) as exc:
+            _rewrite_manifest("#EXTM3U\n..\\private.ts", "p", "master.m3u8", "token")
+        assert exc.value.status_code == 409
+
     @patch("apps.api.routers.hls_proxy.generate_presigned_get_url")
     def test_rewrites_ts_to_presigned(self, mock_presign):
         mock_presign.return_value = "https://s3.example.com/presigned-segment.ts"

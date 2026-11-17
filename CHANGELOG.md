@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Fork deployment defaults
+- Normalize Windows-style paths in existing HLS playlists for playback and ZIP downloads, while rejecting paths outside the media version. Settings reads no longer require the retired compression column.
 - Server multimedia processing and the `worker` service are retired. New web media uploads, metadata processing and burnt-in watermark generation return explicit retirement errors. Prepare videos with Electron/Ingest; existing media, review overlays, email and maintenance remain supported. See [upgrade and rollback notes](docs/media-preparation.md).
 - HLS-only videos offer a streaming ZIP download of their playlist graph. An original is offered only when stored; no server conversion to MP4 is performed.
 - Public share validation now allows 600 requests per IP per minute; the higher limit permits more attempts against shared links.

@@ -30,6 +30,6 @@ class InstanceSettings(Base):
     # feature: NULL means "nobody has chosen", which keeps
     # TRANSCODER_CRF_OFFSET in charge of an instance configured that way. A
     # default of 3 would write "balanced" into every row on upgrade.
-    compression_level: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    compression_level: Mapped[int | None] = mapped_column(SmallInteger, nullable=True, deferred=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

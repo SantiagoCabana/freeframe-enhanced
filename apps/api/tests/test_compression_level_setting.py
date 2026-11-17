@@ -31,6 +31,13 @@ def _row(**kw):
     return row
 
 
+def test_normal_settings_query_does_not_select_retired_compression_column():
+    from sqlalchemy import select
+    statement = str(select(InstanceSettings).compile())
+    assert "compression_level" not in statement
+    assert "storage_limit_bytes" in statement
+
+
 def test_the_column_is_nullable_and_the_default_step_changes_nothing():
     # The migration and the upgrade promise in one place. A server default of 3
     # would write "balanced" into every existing row and silently override an
