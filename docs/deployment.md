@@ -1,5 +1,9 @@
 # Production Deployment Guide
 
+For a shared S3-compatible bucket, set `S3_MANAGE_BUCKET_CORS=false` to prevent
+this instance from replacing bucket CORS at startup. The bucket administrator
+must configure the required browser origins separately.
+
 This guide covers deploying FreeFrame to a production server using Docker Compose.
 
 ## Fork: externally prepared media

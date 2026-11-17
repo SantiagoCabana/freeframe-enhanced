@@ -213,7 +213,7 @@ def ensure_bucket_exists():
             raise
 
     # Set CORS for browser-based uploads (presigned PUT)
-    if not _is_aws_s3():
+    if not _is_aws_s3() and settings.s3_manage_bucket_cors:
         # The same origins the API's CORS allows (settings.cors_origins):
         # a store that enforces bucket CORS (Silo, Garage) refuses uploads and
         # playback from every other origin. MinIO answers PutBucketCors

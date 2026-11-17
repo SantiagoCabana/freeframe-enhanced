@@ -37,6 +37,18 @@ EXPECTED_HEADERS = sorted(
 )
 
 
+def test_bucket_cors_management_can_be_disabled(monkeypatch):
+    client = MagicMock()
+    monkeypatch.setattr(s3_service, "_build_s3_client", lambda config=None: client)
+    monkeypatch.setattr(s3_service, "_is_aws_s3", lambda: False)
+    monkeypatch.setattr(settings, "s3_manage_bucket_cors", False)
+
+    s3_service.ensure_bucket_exists()
+
+    client.head_bucket.assert_called_once()
+    client.put_bucket_cors.assert_not_called()
+
+
 def _headers_written_at_startup() -> list[list[str]]:
     """`AllowedHeaders` of every rule `ensure_bucket_exists()` writes."""
     client = MagicMock()
