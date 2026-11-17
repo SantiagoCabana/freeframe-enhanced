@@ -48,6 +48,7 @@ class Settings(BaseSettings):
     redis_url: str
     s3_storage: str = "minio"  # "s3" for AWS S3, "minio" for local MinIO
     s3_manage_bucket_cors: bool = True
+    hls_proxy_segments: bool = False
     s3_bucket: str = "freeframe"
     s3_endpoint: str = DEFAULT_S3_ENDPOINT
     s3_access_key: str = "minioadmin"

@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 import jwt
 from botocore.exceptions import BotoCoreError, ClientError
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 from urllib.parse import quote
 
@@ -121,12 +121,43 @@ def _rewrite_manifest(
             # Segment -> presigned S3 URL (direct to S3), signed for what is
             # left of the token, so pause-and-resume works for as long as the
             # token does and no longer
-            s3_key = f"{s3_prefix}/{relative_key}"
-            result.append(generate_presigned_get_url(s3_key, expires_in=segment_expires_in))
+            if settings.hls_proxy_segments:
+                result.append(f"/stream/hls-segment/{quote(relative_key, safe='/')}?token={quote(token, safe='')}")
+            else:
+                s3_key = f"{s3_prefix}/{relative_key}"
+                result.append(generate_presigned_get_url(s3_key, expires_in=segment_expires_in))
         else:
             result.append(line)
 
     return "\n".join(result)
+
+
+@router.get("/hls-segment/{path:path}")
+def hls_segment(path: str, request: Request, token: str = Query(...)):
+    payload = _decode_hls_token(token)
+    if not settings.hls_proxy_segments or not path.endswith(".ts"):
+        raise HTTPException(status_code=404, detail="Segment not found")
+    _, name = resolve_hls_reference("master.m3u8", path)
+    if name != path:
+        raise HTTPException(status_code=400, detail="Invalid segment path")
+    args = {"Bucket": settings.s3_bucket, "Key": f"{payload['pfx']}/{name}"}
+    if request.headers.get("range"):
+        args["Range"] = request.headers["range"]
+    try:
+        obj = get_s3_client().get_object(**args)
+    except ClientError as exc:
+        status = 416 if exc.response.get("Error", {}).get("Code") == "InvalidRange" else 404
+        raise HTTPException(status_code=status, detail="Segment unavailable") from exc
+    headers = {"Accept-Ranges": "bytes", "Content-Length": str(obj["ContentLength"])}
+    if obj.get("ContentRange"):
+        headers["Content-Range"] = obj["ContentRange"]
+    def chunks():
+        try:
+            yield from obj["Body"].iter_chunks(chunk_size=1024 * 1024)
+        finally:
+            obj["Body"].close()
+    return StreamingResponse(chunks(), status_code=206 if obj.get("ContentRange") else 200,
+                             media_type="video/mp2t", headers=headers)
 
 
 @router.get("/hls/{path:path}")

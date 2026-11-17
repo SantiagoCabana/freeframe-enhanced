@@ -53,6 +53,30 @@ class TestVerifyHlsToken:
 class TestRewriteManifest:
     """Tests for m3u8 manifest URL rewriting."""
 
+    def test_proxy_segments_when_enabled(self, monkeypatch):
+        from apps.api.routers.hls_proxy import _rewrite_manifest
+        from apps.api.config import settings
+        monkeypatch.setattr(settings, "hls_proxy_segments", True)
+        result = _rewrite_manifest("#EXTM3U\nseg.ts", "p", "720p/index.m3u8", "token")
+        assert "/stream/hls-segment/720p/seg.ts?token=token" in result
+
+    def test_segment_proxy_preserves_range_and_closes_body(self, monkeypatch):
+        import io
+        from botocore.response import StreamingBody
+        from starlette.requests import Request
+        from apps.api.routers.hls_proxy import hls_segment, create_hls_token
+        from apps.api.config import settings
+        monkeypatch.setattr(settings, "hls_proxy_segments", True)
+        body = StreamingBody(io.BytesIO(b"abc"), 3)
+        client = MagicMock()
+        client.get_object.return_value = {"Body": body, "ContentLength": 3, "ContentRange": "bytes 0-2/10"}
+        request = Request({"type": "http", "headers": [(b"range", b"bytes=0-2")]})
+        with patch("apps.api.routers.hls_proxy.get_s3_client", return_value=client):
+            response = hls_segment("720p/seg.ts", request, create_hls_token("p"))
+        assert response.status_code == 206
+        assert response.headers["content-range"] == "bytes 0-2/10"
+        assert client.get_object.call_args.kwargs["Range"] == "bytes=0-2"
+
     def test_windows_variant_reference_is_normalized(self):
         from apps.api.routers.hls_proxy import _rewrite_manifest
         result = _rewrite_manifest("#EXTM3U\n1080p\\playlist.m3u8", "p", "master.m3u8", "token")

@@ -3,6 +3,7 @@ import io
 import posixpath
 import re
 import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from urllib.parse import quote, urlsplit
 
@@ -97,10 +98,13 @@ def archive_objects(prefix: str) -> list[dict]:
                 normalized_lines.append(line)
             data = ("\n".join(normalized_lines) + ("\n" if text.endswith("\n") else "")).encode("utf-8")
             obj.update(data=data, size=len(data))
-        else:
-            response = s3.head_object(Bucket=settings.s3_bucket, Key=key)
-            obj.update(size=response["ContentLength"], etag=response["ETag"])
         objects.append(obj)
+    def head(obj):
+        response = s3.head_object(Bucket=settings.s3_bucket, Key=obj["key"])
+        obj.update(size=response["ContentLength"], etag=response["ETag"])
+
+    with ThreadPoolExecutor(max_workers=16) as pool:
+        list(pool.map(head, (obj for obj in objects if "data" not in obj)))
     return objects
 
 
